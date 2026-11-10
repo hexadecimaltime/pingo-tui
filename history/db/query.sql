@@ -5,8 +5,8 @@ ON CONFLICT(code) DO UPDATE SET
     last_joined_at = CURRENT_TIMESTAMP;
 
 -- name: SaveAnswer :exec
-INSERT INTO answers (session_code, question_text, options, given_answer) 
-VALUES (?, ?, ?, ?);
+INSERT INTO answers (session_code, question_text, options, given_answer, question_type)
+VALUES (?, ?, ?, ?, ?);
 
 -- name: ListSessions :many
 SELECT * FROM sessions
@@ -24,3 +24,13 @@ WHERE id = (
     ORDER BY a.answered_at DESC 
     LIMIT 1
 );
+
+-- name: ListAnswers :many
+SELECT id, session_code, question_text, options, given_answer, question_type, answered_at, correct_answer 
+FROM answers
+ORDER BY answered_at DESC;
+
+-- name: UpdateCorrectAnswerByID :exec
+UPDATE answers 
+SET correct_answer = ? 
+WHERE id = ?;

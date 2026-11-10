@@ -32,5 +32,16 @@
   {"id": "confirm.no", "translation": "No"},
   {"id": "status.operation_cancelled", "translation": "Operation cancelled."},
   {"id": "error.failed_clear_db", "translation": "Failed to clear database: {{.Err}}"},
-  {"id": "status.history_cleared", "translation": "History database cleared successfully."}  
+  {"id": "status.history_cleared", "translation": "History database cleared successfully."},
+  {"id": "label.history_view_title", "translation": "ANSWER HISTORY"},
+  {"id": "hint.no_answers", "translation": "No answers recorded yet."},
+  {"id": "label.edit_correct_answer_title", "translation": "EDIT CORRECT ANSWER"},
+  {"id": "label.unknown_correct_answer", "translation": "???"},
+  {"id": "label.you", "translation": "You"},
+  {"id": "label.correct", "translation": "Correct"},
+  {"id": "label.edit", "translation": "edit"},
+  {"id": "label.back", "translation": "back"},
+  {"id": "label.view_history", "translation": "view history"},
+  {"id": "label.question_label", "translation": "Question: {{.Question}}"},
+  {"id": "label.your_answer_label", "translation": "Your Answer: {{.Answer}}"}
 ]

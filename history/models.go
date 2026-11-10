@@ -15,8 +15,9 @@ type Answer struct {
 	QuestionText  string
 	Options       string
 	GivenAnswer   string
-	CorrectAnswer sql.NullString
+	QuestionType  string
 	AnsweredAt    time.Time
+	CorrectAnswer sql.NullString
 }
 
 type Session struct {
