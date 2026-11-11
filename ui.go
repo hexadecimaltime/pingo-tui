@@ -13,6 +13,7 @@ import (
 	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/hexadecimaltime/pingo-tui/history"
+	"github.com/hexadecimaltime/pingo-tui/table"
 )
 
 type model struct {
@@ -45,10 +46,12 @@ type model struct {
 	configForm             *huh.Form
 	isPromptingCorrect     bool
 	historyAnswers         []history.Answer
-	answerCursor           int
 	editInput              textinput.Model
-	historySessionCursor   int
 	selectedHistorySession string
+
+	// Table Models
+	historySessionTable table.Model
+	historyAnswersTable table.Model
 }
 
 func initialModel(flags cliFlags, cfg *appConfig, store history.Store) model {
@@ -105,19 +108,55 @@ func initialModel(flags cliFlags, cfg *appConfig, store history.Store) model {
 	renameInput.CharLimit = 32
 	renameInput.SetWidth(40)
 
+	// Setup Tables
+	st := table.DefaultStyles()
+	st.Selected = okStyle.Copy().Bold(true)
+	st.Header = titleStyle.Copy().BorderBottom(true).BorderStyle(lipgloss.NormalBorder())
+
+	sessionTable := table.New(
+		table.WithColumns([]table.Column{
+			{Title: "Code", Width: 8},
+			{Title: "Name", Width: 20},
+			{Title: "Date", Width: 18},
+		}),
+		table.WithFocused(true),
+		table.WithHeight(10),
+		table.WithStyles(st),
+	)
+
+	ansTable := table.New(
+		table.WithColumns([]table.Column{
+			{Title: "Date", Width: 12},
+			{Title: "Question", Width: 40},
+			{Title: "", Width: 0}, // Hidden: Given Answer
+			{Title: "", Width: 0}, // Hidden: Correct Answer
+		}),
+		table.WithFocused(true),
+		table.WithHeight(12),
+		table.WithStyles(st),
+		table.WithExpansionFunc(func(index int, row table.Row) string {
+			if len(row) < 4 {
+				return ""
+			}
+			return hintStyle.Render(fmt.Sprintf("    %s: %s\n    %s: %s\n", t(msgYou), row[2], t(msgCorrect), row[3]))
+		}),
+	)
+
 	return model{
-		state:         state,
-		sessionCode:   flags.sessionCode,
-		sessionInput:  sessionInput,
-		renameInput:   renameInput,
-		answerInput:   answerInput,
-		editInput:     editInput,
-		selected:      map[int]bool{},
-		spinner:       spin,
-		store:         store,
-		historyCursor: -1,
-		cfg:           cfg,
-		configForm:    configForm,
+		state:               state,
+		sessionCode:         flags.sessionCode,
+		sessionInput:        sessionInput,
+		renameInput:         renameInput,
+		answerInput:         answerInput,
+		editInput:           editInput,
+		selected:            map[int]bool{},
+		spinner:             spin,
+		store:               store,
+		historyCursor:       -1,
+		cfg:                 cfg,
+		configForm:          configForm,
+		historySessionTable: sessionTable,
+		historyAnswersTable: ansTable,
 	}
 }
 
@@ -233,10 +272,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case historyLoadedMsg:
 		m.sessionHistory = msg
+		var rows []table.Row
+		for _, s := range msg {
+			timeStr := s.LastJoinedAt.Local().Format("02.01.2006 15:04")
+			name := ""
+			if s.Name.Valid {
+				name = s.Name.String
+			}
+			rows = append(rows, table.Row{s.Code, name, timeStr})
+		}
+		m.historySessionTable.SetRows(rows)
 		return m, nil
 
 	case answersLoadedMsg:
 		m.historyAnswers = msg
+		if m.selectedHistorySession != "" {
+			var rows []table.Row
+			for _, a := range m.historyAnswers {
+				if a.SessionCode == m.selectedHistorySession {
+					timeStr := a.AnsweredAt.Local().Format("02.01. 15:04")
+					correct := a.CorrectAnswer.String
+					if correct == "" {
+						correct = t(msgUnknownCorrectAnswer)
+					}
+					// Hidden columns (indices 2 and 3) power the expansion function
+					rows = append(rows, table.Row{timeStr, a.QuestionText, a.GivenAnswer, correct})
+				}
+			}
+			m.historyAnswersTable.SetRows(rows)
+		}
 		return m, nil
 
 	case tickMsg:
@@ -262,6 +326,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
+		m.historySessionTable.SetWidth(msg.Width - 4)
+		m.historyAnswersTable.SetWidth(msg.Width - 4)
+
+		// Dynamically resize the Question column for the answers table
+		ansCols := m.historyAnswersTable.Columns()
+		if len(ansCols) >= 2 {
+			qWidth := msg.Width - ansCols[0].Width - 10
+			if qWidth < 20 {
+				qWidth = 20
+			}
+			ansCols[1].Width = qWidth
+			m.historyAnswersTable.SetColumns(ansCols)
+		}
 		return m, nil
 
 	case pollFoundMsg:
@@ -374,7 +451,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.state != stateTextInput && m.state != stateMultiTextInput && m.state != stateSessionInput && m.state != stateRenameSession && m.state != stateHistoryEdit {
 				return m, tea.Quit
 			}
-		case "ctrl+c", "ctrl+q":
+		case "ctrl+c", "esc", "ctrl+q":
 			if msg.String() == "esc" {
 				if m.state == stateRenameSession {
 					m.state = stateSessionInput
@@ -395,46 +472,48 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.state {
 		case stateHistorySessionSelect:
 			switch msg.String() {
-			case "up", "k":
-				if m.historySessionCursor > 0 {
-					m.historySessionCursor--
-				}
-			case "down", "j":
-				if m.historySessionCursor < len(m.sessionHistory)-1 {
-					m.historySessionCursor++
-				}
 			case "enter":
 				if len(m.sessionHistory) > 0 {
-					m.selectedHistorySession = m.sessionHistory[m.historySessionCursor].Code
+					m.selectedHistorySession = m.sessionHistory[m.historySessionTable.Cursor()].Code
 					m.state = stateHistoryView
-					m.answerCursor = 0
+
+					var rows []table.Row
+					for _, a := range m.historyAnswers {
+						if a.SessionCode == m.selectedHistorySession {
+							timeStr := a.AnsweredAt.Local().Format("02.01. 15:04")
+							correct := a.CorrectAnswer.String
+							if correct == "" {
+								correct = t(msgUnknownCorrectAnswer)
+							}
+							rows = append(rows, table.Row{timeStr, a.QuestionText, a.GivenAnswer, correct})
+						}
+					}
+					m.historyAnswersTable.SetRows(rows)
+					m.historyAnswersTable.SetCursor(0)
 				}
+				return m, nil
 			case "esc", "q":
 				m.state = stateSessionInput
+				return m, nil
+			default:
+				var cmd tea.Cmd
+				m.historySessionTable, cmd = m.historySessionTable.Update(msg)
+				return m, cmd
 			}
-			return m, nil
 
 		case stateHistoryView:
-			var currentAnswers []history.Answer
-			for _, a := range m.historyAnswers {
-				if a.SessionCode == m.selectedHistorySession {
-					currentAnswers = append(currentAnswers, a)
-				}
-			}
-
 			switch msg.String() {
-			case "up", "k":
-				if m.answerCursor > 0 {
-					m.answerCursor--
-				}
-			case "down", "j":
-				if m.answerCursor < len(currentAnswers)-1 {
-					m.answerCursor++
-				}
 			case "enter":
+				var currentAnswers []history.Answer
+				for _, a := range m.historyAnswers {
+					if a.SessionCode == m.selectedHistorySession {
+						currentAnswers = append(currentAnswers, a)
+					}
+				}
+
 				if len(currentAnswers) > 0 {
 					m.state = stateHistoryEdit
-					a := currentAnswers[m.answerCursor]
+					a := currentAnswers[m.historyAnswersTable.Cursor()]
 					currentAns := a.CorrectAnswer.String
 
 					var opts []string
@@ -450,9 +529,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if a.QuestionType == "single_choice" || a.QuestionType == "multi_choice" {
 						m.cursor = 0
 						if a.QuestionType == "multi_choice" {
-							m.selected = make(map[int]bool) // Enable checkboxes
+							m.selected = make(map[int]bool)
 						} else {
-							m.selected = nil // Disable checkboxes for single choice
+							m.selected = nil
 						}
 						return m, nil
 					}
@@ -461,10 +540,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.editInput.Focus()
 					return m, textinput.Blink
 				}
+				return m, nil
 			case "esc", "q":
 				m.state = stateHistorySessionSelect
+				return m, nil
+			default:
+				var cmd tea.Cmd
+				m.historyAnswersTable, cmd = m.historyAnswersTable.Update(msg)
+				return m, cmd
 			}
-			return m, nil
 
 		case stateHistoryEdit:
 			var currentAnswers []history.Answer
@@ -477,7 +561,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(currentAnswers) == 0 {
 				return m, nil
 			}
-			currentAnswerRecord := currentAnswers[m.answerCursor]
+			currentAnswerRecord := currentAnswers[m.historyAnswersTable.Cursor()]
 
 			if currentAnswerRecord.QuestionType == "single_choice" || currentAnswerRecord.QuestionType == "multi_choice" {
 				switch msg.String() {
@@ -546,7 +630,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "v":
 				m.state = stateHistorySessionSelect
-				m.historySessionCursor = 0
+				m.historySessionTable.SetCursor(0)
 				return m, loadAnswersCmd(m.store)
 			case "r":
 				if len(m.sessionHistory) > 0 && m.historyCursor >= 0 && m.historyCursor < len(m.sessionHistory) {
@@ -986,32 +1070,19 @@ func (m model) View() tea.View {
 
 	case stateHistorySessionSelect:
 		var b strings.Builder
-		b.WriteString(titleStyle.Render(t(msgHistoryViewTitle)) + "\n\n")
+		b.WriteString(titleStyle.Render(t(msgHistoryViewTitle)))
+		b.WriteString("\n\n")
 
 		if len(m.sessionHistory) == 0 {
-			b.WriteString(hintStyle.Render(t(msgNoAnswers)) + "\n")
+			b.WriteString(hintStyle.Render(t(msgNoAnswers)))
+			b.WriteString("\n")
 		} else {
-			for i, s := range m.sessionHistory {
-				cursorMark := "  "
-				if i == m.historySessionCursor {
-					cursorMark = "> "
-				}
-
-				timeStr := s.LastJoinedAt.Local().Format("02.01.2006 15:04")
-				displayStr := s.Code
-				if s.Name.Valid && s.Name.String != "" {
-					displayStr = fmt.Sprintf("%s [%s]", s.Name.String, s.Code)
-				}
-
-				line := fmt.Sprintf("%s%s (%s)", cursorMark, displayStr, timeStr)
-				if i == m.historySessionCursor {
-					b.WriteString(okStyle.Render(line) + "\n")
-				} else {
-					b.WriteString(line + "\n")
-				}
-			}
+			b.WriteString(m.historySessionTable.View())
+			b.WriteString("\n")
 		}
-		b.WriteString("\n" + footerLine(m))
+
+		b.WriteString("\n")
+		b.WriteString(footerLine(m))
 		return tea.NewView(b.String())
 
 	case stateHistoryView:
@@ -1023,48 +1094,19 @@ func (m model) View() tea.View {
 		}
 
 		var b strings.Builder
-		b.WriteString(titleStyle.Render(fmt.Sprintf("%s [%s]", t(msgHistoryViewTitle), m.selectedHistorySession)) + "\n\n")
+		b.WriteString(titleStyle.Render(fmt.Sprintf("%s [%s]", t(msgHistoryViewTitle), m.selectedHistorySession)))
+		b.WriteString("\n\n")
 
 		if len(currentAnswers) == 0 {
-			b.WriteString(hintStyle.Render(t(msgNoAnswers)) + "\n")
+			b.WriteString(hintStyle.Render(t(msgNoAnswers)))
+			b.WriteString("\n")
 		} else {
-			termWidth := m.width
-			if termWidth <= 0 {
-				termWidth = 80
-			}
-			maxQWidth := termWidth - 20
-			if maxQWidth < 20 {
-				maxQWidth = 20
-			}
-
-			for i, a := range currentAnswers {
-				timeStr := a.AnsweredAt.Local().Format("02.01. 15:04")
-				qText := a.QuestionText
-				cursorMark := "  "
-				if i == m.answerCursor {
-					cursorMark = "> "
-				}
-
-				if i == m.answerCursor {
-					correct := a.CorrectAnswer.String
-					if correct == "" {
-						correct = t(msgUnknownCorrectAnswer)
-					}
-
-					b.WriteString(okStyle.Render(fmt.Sprintf("%s%s | %s", cursorMark, timeStr, qText)) + "\n")
-					b.WriteString(hintStyle.Render(fmt.Sprintf("    %s: %s", t(msgYou), a.GivenAnswer)) + "\n")
-					b.WriteString(hintStyle.Render(fmt.Sprintf("    %s: %s", t(msgCorrect), correct)) + "\n\n")
-				} else {
-					runes := []rune(qText)
-					if len(runes) > maxQWidth {
-						qText = string(runes[:maxQWidth-3]) + "..."
-					}
-					b.WriteString(fmt.Sprintf("%s%s | %s\n", cursorMark, timeStr, qText))
-				}
-			}
+			b.WriteString(m.historyAnswersTable.View())
+			b.WriteString("\n")
 		}
 
-		b.WriteString("\n" + footerLine(m))
+		b.WriteString("\n")
+		b.WriteString(footerLine(m))
 		return tea.NewView(b.String())
 
 	case stateHistoryEdit:
@@ -1077,7 +1119,7 @@ func (m model) View() tea.View {
 
 		var a history.Answer
 		if len(currentAnswers) > 0 {
-			a = currentAnswers[m.answerCursor]
+			a = currentAnswers[m.historyAnswersTable.Cursor()]
 		}
 
 		var inputView string
@@ -1231,21 +1273,22 @@ func footerHotkeys(m model) string {
 			}
 		}
 		if len(currentAnswers) > 0 {
-			a := currentAnswers[m.answerCursor]
-			if a.QuestionType == "multi_choice" {
+			a := currentAnswers[m.historyAnswersTable.Cursor()]
+			switch a.QuestionType {
+			case "multi_choice":
 				parts = []string{
 					keyStyle.Render("Up/Down") + barDimStyle.Render(" "+t(msgMove)),
 					keyStyle.Render("Space") + barDimStyle.Render(" "+t(msgToggle)),
 					keyStyle.Render("Enter") + barDimStyle.Render(" "+t(msgSubmit)),
 					keyStyle.Render("Esc") + barDimStyle.Render(" "+t(msgBack)),
 				}
-			} else if a.QuestionType == "single_choice" {
+			case "single_choice":
 				parts = []string{
 					keyStyle.Render("Up/Down") + barDimStyle.Render(" "+t(msgMove)),
 					keyStyle.Render("Enter") + barDimStyle.Render(" "+t(msgSubmit)),
 					keyStyle.Render("Esc") + barDimStyle.Render(" "+t(msgBack)),
 				}
-			} else {
+			default:
 				parts = []string{
 					keyStyle.Render("Enter") + barDimStyle.Render(" "+t(msgSubmit)),
 					keyStyle.Render("Esc") + barDimStyle.Render(" "+t(msgBack)),
