@@ -110,8 +110,8 @@ func initialModel(flags cliFlags, cfg *appConfig, store history.Store) model {
 
 	// Setup Tables
 	st := table.DefaultStyles()
-	st.Selected = okStyle.Copy().Bold(true)
-	st.Header = titleStyle.Copy().BorderBottom(true).BorderStyle(lipgloss.NormalBorder())
+	st.Selected = okStyle.Bold(true)
+	st.Header = titleStyle.BorderBottom(true).BorderStyle(lipgloss.NormalBorder())
 
 	sessionTable := table.New(
 		table.WithColumns([]table.Column{
@@ -134,11 +134,26 @@ func initialModel(flags cliFlags, cfg *appConfig, store history.Store) model {
 		table.WithFocused(true),
 		table.WithHeight(12),
 		table.WithStyles(st),
-		table.WithExpansionFunc(func(index int, row table.Row) string {
+		table.WithExpansionFunc(func(index int, row table.Row, width int) string {
 			if len(row) < 4 {
 				return ""
 			}
-			return hintStyle.Render(fmt.Sprintf("    %s: %s\n    %s: %s\n", t(msgYou), row[2], t(msgCorrect), row[3]))
+
+			// Allow lipgloss to automatically word-wrap to the available space
+			// (subtracting 8 to account for the left margin inside the table Expanded style)
+			wrapWidth := width - 8
+			if wrapWidth < 20 {
+				wrapWidth = 20
+			}
+			wrapStyle := lipgloss.NewStyle().Width(wrapWidth)
+
+			qLabel := tData(msgQuestionLabel, map[string]any{"Question": row[1]})
+			youLabel := fmt.Sprintf("    %s: %s", t(msgYou), row[2])
+			correctLabel := fmt.Sprintf("    %s: %s", t(msgCorrect), row[3])
+
+			content := fmt.Sprintf("%s\n%s\n%s\n", qLabel, youLabel, correctLabel)
+
+			return hintStyle.Render(wrapStyle.Render(content))
 		}),
 	)
 
@@ -451,22 +466,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.state != stateTextInput && m.state != stateMultiTextInput && m.state != stateSessionInput && m.state != stateRenameSession && m.state != stateHistoryEdit {
 				return m, tea.Quit
 			}
-		case "ctrl+c", "esc", "ctrl+q":
-			if msg.String() == "esc" {
-				if m.state == stateRenameSession {
-					m.state = stateSessionInput
-					return m, nil
-				}
-				if m.state == stateHistoryEdit {
-					m.state = stateHistoryView
-					m.editInput.Blur()
-					return m, nil
-				}
-				if m.isPromptingCorrect {
-					return m, tea.Quit
-				}
-			}
+		case "ctrl+c", "ctrl+q":
 			return m, tea.Quit
+
+		case "esc":
+			switch m.state {
+			case stateRenameSession:
+				m.state = stateSessionInput
+				return m, nil
+			case stateHistoryEdit:
+				m.state = stateHistoryView
+				m.editInput.Blur()
+				return m, nil
+			case stateHistoryView:
+				m.state = stateHistorySessionSelect
+				m.historySessionTable.Focus()
+				return m, nil
+			}
+			if m.isPromptingCorrect {
+				return m, tea.Quit
+			}
 		}
 
 		switch m.state {

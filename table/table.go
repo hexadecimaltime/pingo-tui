@@ -24,10 +24,8 @@ type Model struct {
 	styles Styles
 
 	viewport viewport.Model
-	start    int
-	end      int
 
-	ExpansionFunc func(index int, row Row) string // NEW
+	ExpansionFunc func(index int, row Row, width int) string
 }
 
 // Row represents one line in the table.
@@ -109,16 +107,16 @@ type Styles struct {
 	Header   lipgloss.Style
 	Cell     lipgloss.Style
 	Selected lipgloss.Style
-	Expanded lipgloss.Style // NEW
+	Expanded lipgloss.Style
 }
 
 // DefaultStyles returns a set of default style definitions for this table.
 func DefaultStyles() Styles {
 	return Styles{
-		Selected: lipgloss.NewStyle().Bold(true).Reverse(true), // NEW: Removed coloring
+		Selected: lipgloss.NewStyle().Bold(true).Reverse(true),
 		Header:   lipgloss.NewStyle().Bold(true).Padding(0, 1),
 		Cell:     lipgloss.NewStyle().Padding(0, 1),
-		Expanded: lipgloss.NewStyle().MarginLeft(4).Padding(1, 0), // NEW
+		Expanded: lipgloss.NewStyle().MarginLeft(4).Padding(1, 0),
 	}
 }
 
@@ -128,16 +126,14 @@ func (m *Model) SetStyles(s Styles) {
 	m.UpdateViewport()
 }
 
-// Option is used to set options in New. For example:
-//
-//	table := New(WithColumns([]Column{{Title: "ID", Width: 10}}))
+// Option is used to set options in New.
 type Option func(*Model)
 
 // New creates a new model for the table widget.
 func New(opts ...Option) Model {
 	m := Model{
 		cursor:   0,
-		viewport: viewport.New(viewport.WithHeight(20)), //nolint:mnd
+		viewport: viewport.New(viewport.WithHeight(20)),
 
 		KeyMap: DefaultKeyMap(),
 		Help:   help.New(),
@@ -202,9 +198,8 @@ func WithKeyMap(km KeyMap) Option {
 	}
 }
 
-// NEW
 // WithExpansionFunc sets a callback to render multiline details under the highlighted row.
-func WithExpansionFunc(f func(index int, row Row) string) Option {
+func WithExpansionFunc(f func(index int, row Row, width int) string) Option {
 	return func(m *Model) {
 		m.ExpansionFunc = f
 	}
@@ -228,9 +223,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case key.Matches(msg, m.KeyMap.PageDown):
 			m.MoveDown(m.viewport.Height())
 		case key.Matches(msg, m.KeyMap.HalfPageUp):
-			m.MoveUp(m.viewport.Height() / 2) //nolint:mnd
+			m.MoveUp(m.viewport.Height() / 2)
 		case key.Matches(msg, m.KeyMap.HalfPageDown):
-			m.MoveDown(m.viewport.Height() / 2) //nolint:mnd
+			m.MoveDown(m.viewport.Height() / 2)
 		case key.Matches(msg, m.KeyMap.GotoTop):
 			m.GotoTop()
 		case key.Matches(msg, m.KeyMap.GotoBottom):
@@ -265,42 +260,52 @@ func (m Model) View() string {
 }
 
 // HelpView is a helper method for rendering the help menu from the keymap.
-// Note that this view is not rendered by default and you must call it
-// manually in your application, where applicable.
 func (m Model) HelpView() string {
 	return m.Help.View(m.KeyMap)
 }
 
-// UpdateViewport updates the list content based on the previously defined
-// columns and rows.
+// UpdateViewport updates the list content and perfectly calculates scrolling
+// to ensure expanded rows are always fully visible on screen.
 func (m *Model) UpdateViewport() {
-	renderedRows := make([]string, 0, len(m.rows))
-
-	// Render only rows from: m.cursor-m.viewport.Height to: m.cursor+m.viewport.Height
-	// Constant runtime, independent of number of rows in a table.
-	// Limits the number of renderedRows to a maximum of 2*m.viewport.Height
-	if m.cursor >= 0 {
-		m.start = clamp(m.cursor-m.viewport.Height(), 0, m.cursor)
-	} else {
-		m.start = 0
+	if len(m.rows) == 0 {
+		m.viewport.SetContent("")
+		return
 	}
-	m.end = clamp(m.cursor+m.viewport.Height(), m.cursor, len(m.rows))
-	for i := m.start; i < m.end; i++ {
+
+	renderedRows := make([]string, 0, len(m.rows))
+	for i := 0; i < len(m.rows); i++ {
 		renderedRows = append(renderedRows, m.renderRow(i))
 	}
 
-	m.viewport.SetContent(
-		lipgloss.JoinVertical(lipgloss.Left, renderedRows...),
-	)
+	m.viewport.SetContent(lipgloss.JoinVertical(lipgloss.Left, renderedRows...))
+
+	// Because only the selected row expands, the starting line index of the
+	// selected row is exactly equal to its row index.
+	cursorLine := m.cursor
+
+	// Calculate exactly how many lines the expanded cursor row takes
+	selectedRowStr := renderedRows[m.cursor]
+	cursorHeight := strings.Count(selectedRowStr, "\n") + 1
+
+	offset := m.viewport.YOffset()
+
+	// Adjust viewport offset to keep the entire expanded row visible
+	if cursorHeight > m.viewport.Height() {
+		offset = cursorLine // Pin to the top of the row if it's larger than the screen
+	} else if cursorLine < offset {
+		offset = cursorLine // Scroll up to the top of the selected row
+	} else if (cursorLine + cursorHeight) > (offset + m.viewport.Height()) {
+		offset = (cursorLine + cursorHeight) - m.viewport.Height() // Scroll down to reveal the bottom
+	}
+
+	m.viewport.SetYOffset(offset)
 }
 
 // SelectedRow returns the selected row.
-// You can cast it to your own implementation.
 func (m Model) SelectedRow() Row {
 	if m.cursor < 0 || m.cursor >= len(m.rows) {
 		return nil
 	}
-
 	return m.rows[m.cursor]
 }
 
@@ -317,11 +322,9 @@ func (m Model) Columns() []Column {
 // SetRows sets a new rows state.
 func (m *Model) SetRows(r []Row) {
 	m.rows = r
-
 	if m.cursor > len(m.rows)-1 {
 		m.cursor = len(m.rows) - 1
 	}
-
 	m.UpdateViewport()
 }
 
@@ -365,57 +368,32 @@ func (m *Model) SetCursor(n int) {
 }
 
 // MoveUp moves the selection up by any number of rows.
-// It can not go above the first row.
 func (m *Model) MoveUp(n int) {
 	m.cursor = clamp(m.cursor-n, 0, len(m.rows)-1)
-
-	offset := m.viewport.YOffset()
-	switch {
-	case m.start == 0:
-		offset = clamp(offset, 0, m.cursor)
-	case m.start < m.viewport.Height():
-		offset = clamp(clamp(offset+n, 0, m.cursor), 0, m.viewport.Height())
-	case offset >= 1:
-		offset = clamp(offset+n, 1, m.viewport.Height())
-	}
-	m.viewport.SetYOffset(offset)
 	m.UpdateViewport()
 }
 
 // MoveDown moves the selection down by any number of rows.
-// It can not go below the last row.
 func (m *Model) MoveDown(n int) {
 	m.cursor = clamp(m.cursor+n, 0, len(m.rows)-1)
 	m.UpdateViewport()
-
-	offset := m.viewport.YOffset()
-	switch {
-	case m.end == len(m.rows) && offset > 0:
-		offset = clamp(offset-n, 1, m.viewport.Height())
-	case m.cursor > (m.end-m.start)/2 && offset > 0:
-		offset = clamp(offset-n, 1, m.cursor)
-	case offset > 1:
-	case m.cursor > offset+m.viewport.Height()-1:
-		offset = clamp(offset+1, 0, 1)
-	}
-	m.viewport.SetYOffset(offset)
 }
 
 // GotoTop moves the selection to the first row.
 func (m *Model) GotoTop() {
-	m.MoveUp(m.cursor)
+	m.cursor = 0
+	m.UpdateViewport()
 }
 
 // GotoBottom moves the selection to the last row.
 func (m *Model) GotoBottom() {
-	m.MoveDown(len(m.rows))
+	m.cursor = len(m.rows) - 1
+	m.UpdateViewport()
 }
 
-// FromValues create the table rows from a simple string. It uses `\n` by
-// default for getting all the rows and the given separator for the fields on
-// each row.
+// FromValues create the table rows from a simple string.
 func (m *Model) FromValues(value, separator string) {
-	rows := []Row{} //nolint:prealloc
+	rows := []Row{}
 	for _, line := range strings.Split(value, "\n") {
 		r := Row{}
 		for _, field := range strings.Split(line, separator) {
@@ -423,7 +401,6 @@ func (m *Model) FromValues(value, separator string) {
 		}
 		rows = append(rows, r)
 	}
-
 	m.SetRows(rows)
 }
 
@@ -456,9 +433,8 @@ func (m *Model) renderRow(r int) string {
 	if r == m.cursor {
 		selectedRow := m.styles.Selected.Render(row)
 
-		// NEW: Inject expanded text below the selected row
 		if m.ExpansionFunc != nil {
-			if expansion := m.ExpansionFunc(r, m.rows[r]); expansion != "" {
+			if expansion := m.ExpansionFunc(r, m.rows[r], m.Width()); expansion != "" {
 				return selectedRow + "\n" + m.styles.Expanded.Render(expansion)
 			}
 		}
