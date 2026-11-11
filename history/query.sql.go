@@ -10,6 +10,44 @@ import (
 	"database/sql"
 )
 
+const listAnswers = `-- name: ListAnswers :many
+SELECT id, session_code, question_text, options, given_answer, question_type, answered_at, correct_answer 
+FROM answers
+ORDER BY answered_at DESC
+`
+
+func (q *Queries) ListAnswers(ctx context.Context) ([]Answer, error) {
+	rows, err := q.db.QueryContext(ctx, listAnswers)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Answer
+	for rows.Next() {
+		var i Answer
+		if err := rows.Scan(
+			&i.ID,
+			&i.SessionCode,
+			&i.QuestionText,
+			&i.Options,
+			&i.GivenAnswer,
+			&i.QuestionType,
+			&i.AnsweredAt,
+			&i.CorrectAnswer,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSessions = `-- name: ListSessions :many
 SELECT code, name, last_joined_at FROM sessions
 ORDER BY last_joined_at DESC
@@ -39,8 +77,8 @@ func (q *Queries) ListSessions(ctx context.Context) ([]Session, error) {
 }
 
 const saveAnswer = `-- name: SaveAnswer :exec
-INSERT INTO answers (session_code, question_text, options, given_answer) 
-VALUES (?, ?, ?, ?)
+INSERT INTO answers (session_code, question_text, options, given_answer, question_type)
+VALUES (?, ?, ?, ?, ?)
 `
 
 type SaveAnswerParams struct {
@@ -48,6 +86,7 @@ type SaveAnswerParams struct {
 	QuestionText string
 	Options      string
 	GivenAnswer  string
+	QuestionType string
 }
 
 func (q *Queries) SaveAnswer(ctx context.Context, arg SaveAnswerParams) error {
@@ -56,6 +95,7 @@ func (q *Queries) SaveAnswer(ctx context.Context, arg SaveAnswerParams) error {
 		arg.QuestionText,
 		arg.Options,
 		arg.GivenAnswer,
+		arg.QuestionType,
 	)
 	return err
 }
@@ -78,6 +118,22 @@ type UpdateCorrectAnswerParams struct {
 
 func (q *Queries) UpdateCorrectAnswer(ctx context.Context, arg UpdateCorrectAnswerParams) error {
 	_, err := q.db.ExecContext(ctx, updateCorrectAnswer, arg.CorrectAnswer, arg.SessionCode)
+	return err
+}
+
+const updateCorrectAnswerByID = `-- name: UpdateCorrectAnswerByID :exec
+UPDATE answers 
+SET correct_answer = ? 
+WHERE id = ?
+`
+
+type UpdateCorrectAnswerByIDParams struct {
+	CorrectAnswer sql.NullString
+	ID            int64
+}
+
+func (q *Queries) UpdateCorrectAnswerByID(ctx context.Context, arg UpdateCorrectAnswerByIDParams) error {
+	_, err := q.db.ExecContext(ctx, updateCorrectAnswerByID, arg.CorrectAnswer, arg.ID)
 	return err
 }
 

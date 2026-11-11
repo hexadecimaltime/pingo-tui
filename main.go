@@ -27,6 +27,9 @@ const (
 	stateConfigMenu
 	stateRenameSession
 	statePromptCorrectAnswer
+	stateHistoryView
+	stateHistoryEdit
+	stateHistorySessionSelect
 )
 
 type option struct {
@@ -80,6 +83,8 @@ type fayeErrorMsg struct {
 	err error
 }
 type historyLoadedMsg []history.Session
+
+type answersLoadedMsg []history.Answer
 
 // --- Program Entry Point ---
 

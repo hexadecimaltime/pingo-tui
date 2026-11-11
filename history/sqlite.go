@@ -20,7 +20,7 @@ func InitDB() (*Queries, error) {
 		return nil, err
 	}
 
-	dbPath := filepath.Join(configDir, "pingo-cli", "history.db")
+	dbPath := filepath.Join(configDir, "pingo-tui", "history.db")
 	os.MkdirAll(filepath.Dir(dbPath), 0755)
 
 	db, err := sql.Open("sqlite", dbPath)
@@ -51,6 +51,12 @@ func InitDB() (*Queries, error) {
 		userVersion = 3
 	}
 
+	if userVersion == 3 {
+		db.Exec("ALTER TABLE answers ADD COLUMN question_type TEXT NOT NULL DEFAULT '';")
+		db.Exec("PRAGMA user_version = 4;")
+		userVersion = 4
+	}
+
 	return New(db), nil
 }
 
@@ -66,7 +72,7 @@ func (s *SQLiteStore) UpsertSession(ctx context.Context, code string) error {
 	return s.q.UpsertSession(ctx, code)
 }
 
-func (s *SQLiteStore) SaveAnswer(ctx context.Context, sessionCode, question, answer string, options []string) error {
+func (s *SQLiteStore) SaveAnswer(ctx context.Context, sessionCode, question, answer string, options []string, questionType string) error {
 	optionsJSON, err := json.Marshal(options)
 	if err != nil {
 		return err
@@ -76,6 +82,7 @@ func (s *SQLiteStore) SaveAnswer(ctx context.Context, sessionCode, question, ans
 		QuestionText: question,
 		Options:      string(optionsJSON),
 		GivenAnswer:  answer,
+		QuestionType: questionType,
 	})
 }
 
@@ -89,7 +96,7 @@ func ClearDB() error {
 		return err
 	}
 
-	dbPath := filepath.Join(configDir, "pingo-cli", "history.db")
+	dbPath := filepath.Join(configDir, "pingo-tui", "history.db")
 
 	err = os.Remove(dbPath)
 	if err != nil && !os.IsNotExist(err) {
@@ -109,5 +116,16 @@ func (s *SQLiteStore) UpdateCorrectAnswer(ctx context.Context, sessionCode, corr
 	return s.q.UpdateCorrectAnswer(ctx, UpdateCorrectAnswerParams{
 		CorrectAnswer: sql.NullString{String: correctAnswer, Valid: correctAnswer != ""},
 		SessionCode:   sessionCode,
+	})
+}
+
+func (s *SQLiteStore) ListAnswers(ctx context.Context) ([]Answer, error) {
+	return s.q.ListAnswers(ctx)
+}
+
+func (s *SQLiteStore) UpdateCorrectAnswerByID(ctx context.Context, id int64, correctAnswer string) error {
+	return s.q.UpdateCorrectAnswerByID(ctx, UpdateCorrectAnswerByIDParams{
+		CorrectAnswer: sql.NullString{String: correctAnswer, Valid: correctAnswer != ""},
+		ID:            id,
 	})
 }

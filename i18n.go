@@ -46,6 +46,19 @@ const (
 	msgOperationCancelled     = "status.operation_cancelled"
 	msgFailedClearDB          = "error.failed_clear_db"
 	msgHistoryCleared         = "status.history_cleared"
+
+	// History View Keys updated to match prefixed JSONs
+	msgHistoryViewTitle       = "label.history_view_title"
+	msgNoAnswers              = "hint.no_answers"
+	msgEditCorrectAnswerTitle = "label.edit_correct_answer_title"
+	msgUnknownCorrectAnswer   = "label.unknown_correct_answer"
+	msgYou                    = "label.you"
+	msgCorrect                = "label.correct"
+	msgEdit                   = "label.edit"
+	msgBack                   = "label.back"
+	msgViewHistory            = "label.view_history"
+	msgQuestionLabel          = "label.question_label"
+	msgYourAnswerLabel        = "label.your_answer_label"
 )
 
 //go:embed locales/*.json

@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS answers (
     question_text TEXT NOT NULL,
     options TEXT NOT NULL,
     given_answer TEXT NOT NULL,
-    correct_answer TEXT,
+    question_type TEXT NOT NULL DEFAULT '',
     answered_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    correct_answer TEXT,
     FOREIGN KEY(session_code) REFERENCES sessions(code)
 );

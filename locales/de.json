@@ -32,5 +32,16 @@
   {"id": "confirm.no", "translation": "Nein"},
   {"id": "status.operation_cancelled", "translation": "Vorgang abgebrochen."},
   {"id": "error.failed_clear_db", "translation": "Fehler beim Löschen der Datenbank: {{.Err}}"},
-  {"id": "status.history_cleared", "translation": "Verlaufsdatenbank erfolgreich gelöscht."}
+  {"id": "status.history_cleared", "translation": "Verlaufsdatenbank erfolgreich gelöscht."},
+  {"id": "label.history_view_title", "translation": "ANTWORTVERLAUF"},
+  {"id": "hint.no_answers", "translation": "Noch keine Antworten gespeichert."},
+  {"id": "label.edit_correct_answer_title", "translation": "RICHTIGE ANTWORT BEARBEITEN"},
+  {"id": "label.unknown_correct_answer", "translation": "???"},
+  {"id": "label.you", "translation": "Du"},
+  {"id": "label.correct", "translation": "Korrekt"},
+  {"id": "label.edit", "translation": "bearbeiten"},
+  {"id": "label.back", "translation": "zurück"},
+  {"id": "label.view_history", "translation": "Verlauf anzeigen"},
+  {"id": "label.question_label", "translation": "Frage: {{.Question}}"},
+  {"id": "label.your_answer_label", "translation": "Deine Antwort: {{.Answer}}"}
 ]
