@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"bytes"
@@ -55,21 +55,25 @@ func subscribeFayeSurvey(client *FayeClient, surveyID string) error {
 	return client.Subscribe(context.Background(), "/s/"+surveyID)
 }
 
-func submitVote(data pollData, answers []string) tea.Cmd {
+func SubmitVote(data PollData, answers []string) tea.Cmd {
 	return func() tea.Msg {
 		values := url.Values{}
-		for key, val := range data.hidden {
+		// Updated to capitalized Hidden
+		for key, val := range data.Hidden {
 			values.Add(key, val)
 		}
 		for _, answer := range answers {
-			values.Add(data.inputName, answer)
+			// Updated to capitalized InputName
+			values.Add(data.InputName, answer)
 		}
 		values.Add("commit", "Vote!")
-		if _, ok := data.hidden["utf8"]; !ok {
+		// Updated to capitalized Hidden
+		if _, ok := data.Hidden["utf8"]; !ok {
 			values.Add("utf8", "✓")
 		}
 
-		submitURL := data.formAction
+		// Updated to capitalized FormAction
+		submitURL := data.FormAction
 		if !strings.HasPrefix(submitURL, "http") {
 			submitURL = baseURL + submitURL
 		}
