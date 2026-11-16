@@ -93,3 +93,10 @@ release_flags := "-trimpath -ldflags=\"-s -w -X main.version={{version}}\""
 [group("dev")]
 sqlc:
     sqlc generate --file sqlc.yaml
+
+[windows]
+[group("dev")]
+export:
+    cd exports
+    go run github.com/traefik/yaegi/cmd/yaegi@latest extract -name exports github.com/hexadecimaltime/pingo-tui/app
+    go run github.com/traefik/yaegi/cmd/yaegi@latest extract -name exports charm.land/bubbletea/v2

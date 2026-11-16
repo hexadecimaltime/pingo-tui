@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"encoding/json"
@@ -10,9 +10,10 @@ import (
 	"strings"
 )
 
-type appConfig struct {
-	HistoryEnabled bool   `json:"history_enabled"`
-	Language       string `json:"language"`
+type AppConfig struct {
+	HistoryEnabled bool                   `json:"history_enabled"`
+	Language       string                 `json:"language"`
+	PluginSettings map[string]interface{} `json:"plugin_settings"` // Added for plugins
 }
 
 func getConfigPath() string {
@@ -23,17 +24,22 @@ func getConfigPath() string {
 	return filepath.Join(configDir, "pingo-tui", "config.json")
 }
 
-func loadConfig() appConfig {
-	var cfg appConfig
+func LoadConfig() AppConfig {
+	cfg := AppConfig{
+		PluginSettings: make(map[string]interface{}), // Initialize map
+	}
 	path := getConfigPath()
 	data, err := os.ReadFile(path)
 	if err == nil {
 		json.Unmarshal(data, &cfg)
 	}
+	if cfg.PluginSettings == nil {
+		cfg.PluginSettings = make(map[string]interface{})
+	}
 	return cfg
 }
 
-func saveConfig(cfg appConfig) error {
+func SaveConfig(cfg AppConfig) error {
 	path := getConfigPath()
 	os.MkdirAll(filepath.Dir(path), 0755)
 	data, err := json.MarshalIndent(cfg, "", "  ")

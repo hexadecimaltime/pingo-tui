@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"bytes"
@@ -9,26 +9,26 @@ import (
 	"github.com/PuerkitoBio/goquery"
 )
 
-func parsePollHTML(body []byte) (pollData, bool) {
+func parsePollHTML(body []byte) (PollData, bool) {
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
 	if err != nil {
-		return pollData{}, false
+		return PollData{}, false
 	}
 	form := findPollForm(doc)
 	if form == nil || form.Length() == 0 {
-		return pollData{}, false
+		return PollData{}, false
 	}
 	return parseForm(doc, form, body)
 }
 
-func parseSurveyHTML(body []byte) (pollData, bool) {
+func parseSurveyHTML(body []byte) (PollData, bool) {
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
 	if err != nil {
-		return pollData{}, false
+		return PollData{}, false
 	}
 	form := findPollForm(doc)
 	if form == nil || form.Length() == 0 {
-		return pollData{}, false
+		return PollData{}, false
 	}
 	return parseForm(doc, form, body)
 }
@@ -129,7 +129,7 @@ func firstText(selection *goquery.Selection) string {
 	return text
 }
 
-func parseForm(doc *goquery.Document, form *goquery.Selection, body []byte) (pollData, bool) {
+func parseForm(doc *goquery.Document, form *goquery.Selection, body []byte) (PollData, bool) {
 	question := extractQuestion(doc, form)
 	formAction, _ := form.Attr("action")
 	if formAction == "" {
@@ -174,22 +174,22 @@ func parseForm(doc *goquery.Document, form *goquery.Selection, body []byte) (pol
 			inputName += "[]"
 		}
 
-		return pollData{
-			question:      question,
-			formAction:    formAction,
-			hidden:        hidden,
-			inputName:     inputName,
-			inputLabel:    label,
-			surveyID:      surveyID,
-			isNumberInput: isNumberInput,
-			isMultiText:   isMultiText,
-			hasCountdown:  hasCountdown,
-			countdownEnd:  countdownEnd,
+		return PollData{
+			Question:      question,
+			FormAction:    formAction,
+			Hidden:        hidden,
+			InputName:     inputName,
+			InputLabel:    label,
+			SurveyID:      surveyID,
+			IsNumberInput: isNumberInput,
+			IsMultiText:   isMultiText,
+			HasCountdown:  hasCountdown,
+			CountdownEnd:  countdownEnd,
 		}, true
 	}
 
 	optionInputs := form.Find("input[name='option'], input[name='option[]'], input[name='options[]'], input[name='survey_answer[]']")
-	options := make([]option, 0)
+	options := make([]Option, 0)
 	isMultiChoice := false
 	inputName := "option"
 	optionInputs.Each(func(i int, s *goquery.Selection) {
@@ -208,23 +208,23 @@ func parseForm(doc *goquery.Document, form *goquery.Selection, body []byte) (pol
 		if label == "" {
 			label = tData(msgOptionDefault, map[string]any{"Index": i + 1})
 		}
-		options = append(options, option{label: label, value: value})
+		options = append(options, Option{Label: label, Value: value})
 	})
 
 	if len(options) == 0 {
-		return pollData{}, false
+		return PollData{}, false
 	}
 
-	return pollData{
-		question:      question,
-		formAction:    formAction,
-		hidden:        hidden,
-		inputName:     inputName,
-		surveyID:      surveyID,
-		isMultiChoice: isMultiChoice,
-		options:       options,
-		hasCountdown:  hasCountdown,
-		countdownEnd:  countdownEnd,
+	return PollData{
+		Question:      question,
+		FormAction:    formAction,
+		Hidden:        hidden,
+		InputName:     inputName,
+		SurveyID:      surveyID,
+		IsMultiChoice: isMultiChoice,
+		Options:       options,
+		HasCountdown:  hasCountdown,
+		CountdownEnd:  countdownEnd,
 	}, true
 }
 

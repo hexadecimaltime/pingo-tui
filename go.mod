@@ -9,7 +9,10 @@ require (
 	charm.land/lipgloss/v2 v2.0.1
 	github.com/PuerkitoBio/goquery v1.9.2
 	github.com/catppuccin/go v0.3.0
+	github.com/charmbracelet/ultraviolet v0.0.0-20260205113103-524a6607adb8
+	github.com/charmbracelet/x/ansi v0.11.6
 	github.com/nicksnyder/go-i18n/v2 v2.6.0
+	github.com/traefik/yaegi v0.16.3
 	golang.org/x/text v0.23.0
 	modernc.org/sqlite v1.53.0
 	nhooyr.io/websocket v1.8.11
@@ -19,8 +22,6 @@ require (
 	github.com/andybalholm/cascadia v1.3.2 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/charmbracelet/colorprofile v0.4.2 // indirect
-	github.com/charmbracelet/ultraviolet v0.0.0-20260205113103-524a6607adb8 // indirect
-	github.com/charmbracelet/x/ansi v0.11.6 // indirect
 	github.com/charmbracelet/x/exp/ordered v0.1.0 // indirect
 	github.com/charmbracelet/x/exp/strings v0.0.0-20240722160745-212f7b056ed0 // indirect
 	github.com/charmbracelet/x/term v0.2.2 // indirect
