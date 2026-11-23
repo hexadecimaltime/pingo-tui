@@ -151,8 +151,8 @@ func fetchCountdown(sessionCode string) tea.Cmd {
 		}
 
 		if _, ok := parsePollHTML(bodyBytes); ok {
-			if end, ok := parseCountdown(bodyBytes); ok {
-				return countdownUpdateMsg{end: end}
+			if end, dur, ok := parseCountdown(bodyBytes); ok {
+				return countdownUpdateMsg{end: end, duration: dur}
 			}
 			return nil
 		}
@@ -165,8 +165,8 @@ func fetchCountdown(sessionCode string) tea.Cmd {
 				resp2.Body.Close()
 				if err == nil {
 					if _, ok := parseSurveyHTML(body2); ok {
-						if end, ok := parseCountdown(body2); ok {
-							return countdownUpdateMsg{end: end}
+						if end, dur, ok := parseCountdown(body2); ok {
+							return countdownUpdateMsg{end: end, duration: dur}
 						}
 						return nil
 					}
