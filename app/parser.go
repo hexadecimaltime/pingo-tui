@@ -147,7 +147,7 @@ func parseForm(doc *goquery.Document, form *goquery.Selection, body []byte) (Pol
 
 	surveyID := extractSurveyID(hidden, formAction)
 
-	countdownEnd, hasCountdown := parseCountdown(body)
+	countdownEnd, countdownTotal, hasCountdown := parseCountdown(body)
 
 	textInput := form.Find("input[type='text'], input[type='number']").First()
 	textArea := form.Find("textarea").First()
@@ -175,16 +175,17 @@ func parseForm(doc *goquery.Document, form *goquery.Selection, body []byte) (Pol
 		}
 
 		return PollData{
-			Question:      question,
-			FormAction:    formAction,
-			Hidden:        hidden,
-			InputName:     inputName,
-			InputLabel:    label,
-			SurveyID:      surveyID,
-			IsNumberInput: isNumberInput,
-			IsMultiText:   isMultiText,
-			HasCountdown:  hasCountdown,
-			CountdownEnd:  countdownEnd,
+			Question:       question,
+			FormAction:     formAction,
+			Hidden:         hidden,
+			InputName:      inputName,
+			InputLabel:     label,
+			SurveyID:       surveyID,
+			IsNumberInput:  isNumberInput,
+			IsMultiText:    isMultiText,
+			HasCountdown:   hasCountdown,
+			CountdownEnd:   countdownEnd,
+			CountdownTotal: countdownTotal,
 		}, true
 	}
 
@@ -216,15 +217,16 @@ func parseForm(doc *goquery.Document, form *goquery.Selection, body []byte) (Pol
 	}
 
 	return PollData{
-		Question:      question,
-		FormAction:    formAction,
-		Hidden:        hidden,
-		InputName:     inputName,
-		SurveyID:      surveyID,
-		IsMultiChoice: isMultiChoice,
-		Options:       options,
-		HasCountdown:  hasCountdown,
-		CountdownEnd:  countdownEnd,
+		Question:       question,
+		FormAction:     formAction,
+		Hidden:         hidden,
+		InputName:      inputName,
+		SurveyID:       surveyID,
+		IsMultiChoice:  isMultiChoice,
+		Options:        options,
+		HasCountdown:   hasCountdown,
+		CountdownEnd:   countdownEnd,
+		CountdownTotal: countdownTotal,
 	}, true
 }
 
@@ -254,22 +256,22 @@ func findSurveyURL(body []byte) string {
 	return baseURL + surveyURL
 }
 
-func parseCountdown(body []byte) (time.Time, bool) {
+func parseCountdown(body []byte) (time.Time, time.Duration, bool) {
 	matches := countdownPattern.FindSubmatch(body)
 	if len(matches) < 2 {
-		return time.Time{}, false
+		return time.Time{}, 0, false
 	}
 	value := string(matches[1])
 	parsed, err := time.ParseDuration(value + "s")
 	if err != nil {
-		return time.Time{}, false
+		return time.Time{}, 0, false
 	}
 	if parsed > 1000*time.Second {
 		ms, err := time.ParseDuration(value + "ms")
 		if err != nil {
-			return time.Time{}, false
+			return time.Time{}, 0, false
 		}
-		return time.Now().Add(ms), true
+		return time.Now().Add(ms), ms, true
 	}
-	return time.Now().Add(parsed), true
+	return time.Now().Add(parsed), parsed, true
 }

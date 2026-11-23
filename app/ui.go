@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/progress"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
@@ -45,18 +46,19 @@ type Option struct {
 
 // Exported for Yaegi plugins
 type PollData struct {
-	Question      string
-	FormAction    string
-	Hidden        map[string]string
-	InputName     string
-	InputLabel    string
-	SurveyID      string
-	IsNumberInput bool
-	IsMultiText   bool
-	IsMultiChoice bool
-	Options       []Option
-	CountdownEnd  time.Time
-	HasCountdown  bool
+	Question       string
+	FormAction     string
+	Hidden         map[string]string
+	InputName      string
+	InputLabel     string
+	SurveyID       string
+	IsNumberInput  bool
+	IsMultiText    bool
+	IsMultiChoice  bool
+	Options        []Option
+	CountdownEnd   time.Time
+	CountdownTotal time.Duration
+	HasCountdown   bool
 }
 
 type pollFoundMsg struct {
@@ -76,7 +78,8 @@ type submitResultMsg struct {
 type tickMsg time.Time
 type followUpMsg struct{}
 type countdownUpdateMsg struct {
-	end time.Time
+	end      time.Time
+	duration time.Duration
 }
 type pollStoppedMsg struct{}
 type fayeConnectedMsg struct {
@@ -106,6 +109,7 @@ type Model struct {
 	Answers                []string
 	Data                   PollData
 	Spinner                spinner.Model
+	Progress               progress.Model
 	ErrMsg                 string
 	StatusMsg              string
 	LastCountdownFetch     time.Time
@@ -153,6 +157,13 @@ func InitialModel(flags cliFlags, cfg *AppConfig, store history.Store, plugins *
 
 	spin := spinner.New()
 	spin.Spinner = spinner.Line
+
+	prog := progress.New(
+		progress.WithColors(mochaRed, mochaMauve),
+		progress.WithoutPercentage(),
+		progress.WithWidth(40),
+	)
+	prog.EmptyColor = mochaSurface1
 
 	state := StateSessionInput
 	var configForm *huh.Form
@@ -249,6 +260,7 @@ func InitialModel(flags cliFlags, cfg *AppConfig, store history.Store, plugins *
 		EditInput:           editInput,
 		Selected:            map[int]bool{},
 		Spinner:             spin,
+		Progress:            prog,
 		Store:               store,
 		HistoryCursor:       -1,
 		Cfg:                 cfg,
@@ -409,12 +421,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.StatusMsg = t(msgTimeRanOut)
 				return m, tea.Quit
 			}
+			if cmd := m.syncCountdownProgress(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		}
 		if shouldRefreshCountdown(m) && time.Since(m.LastCountdownFetch) >= time.Second {
 			m.LastCountdownFetch = time.Now()
 			cmds = append(cmds, fetchCountdown(m.SessionCode))
 		}
 		return m, tea.Batch(cmds...)
+
+	case progress.FrameMsg:
+		var cmd tea.Cmd
+		m.Progress, cmd = m.Progress.Update(msg)
+		return m, cmd
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -423,6 +443,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
+		barWidth := msg.Width - 25
+		if barWidth < 20 {
+			barWidth = 20
+		} else if barWidth > 50 {
+			barWidth = 50
+		}
+		m.Progress.SetWidth(barWidth)
 		m.HistorySessionTable.SetWidth(msg.Width - 4)
 		m.HistoryAnswersTable.SetWidth(msg.Width - 4)
 
@@ -460,24 +487,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return nil
 		}
 
+		var progressCmd tea.Cmd
+		if m.Data.HasCountdown {
+			if m.Data.CountdownTotal <= 0 {
+				m.Data.CountdownTotal = time.Until(m.Data.CountdownEnd)
+			}
+			progressCmd = m.syncCountdownProgress()
+		}
+
 		if msg.data.IsMultiChoice {
 			m.AnswerInput.Blur()
 			m.State = StateMultiChoice
-			return m, saveSessionCmd
+			return m, tea.Batch(saveSessionCmd, progressCmd)
 		}
 		if len(msg.data.Options) > 0 {
 			m.AnswerInput.Blur()
 			m.State = StateSingleChoice
-			return m, saveSessionCmd
+			return m, tea.Batch(saveSessionCmd, progressCmd)
 		}
 		if msg.data.IsMultiText {
 			m.AnswerInput.Focus()
 			m.State = StateMultiTextInput
-			return m, saveSessionCmd
+			return m, tea.Batch(saveSessionCmd, progressCmd)
 		}
 		m.AnswerInput.Focus()
 		m.State = StateTextInput
-		return m, saveSessionCmd
+		return m, tea.Batch(saveSessionCmd, progressCmd)
 
 	case pollErrorMsg:
 		m.State = StateError
@@ -531,17 +566,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, listenFaye(m.FayeEvents)
 
 	case fayeEventMsg:
-		m = handleFayeEvent(m, msg.event)
-		return m, listenFaye(m.FayeEvents)
+		var cmd tea.Cmd
+		m, cmd = handleFayeEvent(m, msg.event)
+		return m, tea.Batch(cmd, listenFaye(m.FayeEvents))
 
 	case fayeErrorMsg:
 		m.WsActive = false
 		return m, nil
 
 	case countdownUpdateMsg:
-		m.Data.CountdownEnd = msg.end
-		m.Data.HasCountdown = true
-		return m, nil
+		cmd := m.applyCountdown(msg.end, msg.duration)
+		return m, cmd
 
 	case followUpMsg:
 		return m, tea.Quit
@@ -955,12 +990,44 @@ func shouldRefreshCountdown(m Model) bool {
 	return !m.WsActive && m.SessionCode != "" && (m.State == StateTextInput || m.State == StateMultiTextInput || m.State == StateSingleChoice || m.State == StateMultiChoice)
 }
 
-func handleFayeEvent(m Model, event FayeEvent) Model {
+func (m *Model) applyCountdown(end time.Time, dur time.Duration) tea.Cmd {
+	if dur <= 0 {
+		dur = time.Until(end)
+	}
+	if dur < 0 {
+		dur = 0
+	}
+	if !m.Data.HasCountdown || m.Data.CountdownTotal <= 0 || dur > m.Data.CountdownTotal {
+		m.Data.CountdownTotal = dur
+	}
+	m.Data.CountdownEnd = end
+	m.Data.HasCountdown = true
+	return m.syncCountdownProgress()
+}
+
+func (m *Model) syncCountdownProgress() tea.Cmd {
+	if !m.Data.HasCountdown || m.Data.CountdownTotal <= 0 {
+		return nil
+	}
+	remaining := time.Until(m.Data.CountdownEnd)
+	if remaining < 0 {
+		remaining = 0
+	}
+	percent := float64(remaining) / float64(m.Data.CountdownTotal)
+	if percent < 0 {
+		percent = 0
+	} else if percent > 1 {
+		percent = 1
+	}
+	return m.Progress.SetPercent(percent)
+}
+
+func handleFayeEvent(m Model, event FayeEvent) (Model, tea.Cmd) {
 	data := event.Data
 	switch data.Type {
 	case "status_change":
 		if !timestampOk(&m, data.Timestamp) {
-			return m
+			return m, nil
 		}
 		if data.Session != "" && m.SubscribedSurvey != data.Session {
 			m.SubscribedSurvey = data.Session
@@ -969,8 +1036,9 @@ func handleFayeEvent(m Model, event FayeEvent) Model {
 		switch payloadString(data.Payload) {
 		case "stop_scheduled":
 			if data.Time > 0 {
-				m.Data.CountdownEnd = time.Now().Add(time.Duration(data.Time) * time.Millisecond)
-				m.Data.HasCountdown = true
+				dur := time.Duration(data.Time) * time.Millisecond
+				cmd := m.applyCountdown(time.Now().Add(dur), dur)
+				return m, cmd
 			}
 		case "stopped":
 			m.State = StateDone
@@ -978,14 +1046,15 @@ func handleFayeEvent(m Model, event FayeEvent) Model {
 		}
 	case "countdown":
 		if !iterationOk(&m, data.Iteration) {
-			return m
+			return m, nil
 		}
 		if payload := payloadFloat(data.Payload); payload > 0 {
-			m.Data.CountdownEnd = time.Now().Add(time.Duration(payload) * time.Millisecond)
-			m.Data.HasCountdown = true
+			dur := time.Duration(payload) * time.Millisecond
+			cmd := m.applyCountdown(time.Now().Add(dur), dur)
+			return m, cmd
 		}
 	}
-	return m
+	return m, nil
 }
 
 func timestampOk(m *Model, ts string) bool {
@@ -1112,7 +1181,7 @@ func (m Model) View() tea.View {
 
 	case StateTextInput:
 		q := questionLine(m.Question)
-		lines := []string{timeLeftLine(m.Data)}
+		lines := []string{timeLeftLine(m)}
 		if p := correctPromptLine(m); p != "" {
 			lines = append(lines, p)
 		}
@@ -1125,7 +1194,7 @@ func (m Model) View() tea.View {
 	case StateMultiTextInput:
 		answers := strings.Join(m.Answers, ", ")
 		q := questionLine(m.Question)
-		lines := []string{timeLeftLine(m.Data)}
+		lines := []string{timeLeftLine(m)}
 		if p := correctPromptLine(m); p != "" {
 			lines = append(lines, p)
 		}
@@ -1145,7 +1214,7 @@ func (m Model) View() tea.View {
 
 	case StateSingleChoice:
 		q := questionLine(m.Question)
-		lines := []string{timeLeftLine(m.Data)}
+		lines := []string{timeLeftLine(m)}
 		if p := correctPromptLine(m); p != "" {
 			lines = append(lines, p)
 		}
@@ -1157,7 +1226,7 @@ func (m Model) View() tea.View {
 
 	case StateMultiChoice:
 		q := questionLine(m.Question)
-		lines := []string{timeLeftLine(m.Data)}
+		lines := []string{timeLeftLine(m)}
 		if p := correctPromptLine(m); p != "" {
 			lines = append(lines, p)
 		}
@@ -1175,7 +1244,7 @@ func (m Model) View() tea.View {
 
 	case StateSubmitting:
 		q := questionLine(m.Question)
-		lines := []string{timeLeftLine(m.Data)}
+		lines := []string{timeLeftLine(m)}
 		if q != "" {
 			lines = append(lines, q)
 		}
@@ -1272,17 +1341,17 @@ func (m Model) View() tea.View {
 	}
 }
 
-func timeLeftLine(data PollData) string {
-	if !data.HasCountdown {
+func timeLeftLine(m Model) string {
+	if !m.Data.HasCountdown {
 		return ""
 	}
-	remaining := time.Until(data.CountdownEnd)
+	remaining := time.Until(m.Data.CountdownEnd)
 	if remaining < 0 {
 		remaining = 0
 	}
 	label := hintStyle.Render(t(msgTimeLeft))
 	value := lipgloss.NewStyle().Bold(true).Foreground(mochaMauve).Render(formatDuration(remaining))
-	return label + value
+	return label + value + "  " + m.Progress.View()
 }
 
 func questionLine(question string) string {
