@@ -49,6 +49,17 @@ func (pm *PluginManager) HandleKey(m *Model, msg tea.KeyMsg) (bool, tea.Cmd) {
 	return false, nil
 }
 
+// Hook: Intercept mouse events globally
+func (pm *PluginManager) HandleMouse(m *Model, msg tea.MouseMsg) (bool, tea.Cmd) {
+	v, err := pm.i.Eval("HandleMouse")
+	if err == nil && v.IsValid() {
+		if fn, ok := v.Interface().(func(*Model, tea.MouseMsg) (bool, tea.Cmd)); ok {
+			return fn(m, msg)
+		}
+	}
+	return false, nil
+}
+
 // Hook: Triggered immediately after a poll answer is successfully submitted
 func (pm *PluginManager) OnSubmitSuccess(m *Model) {
 	v, err := pm.i.Eval("OnSubmitSuccess")

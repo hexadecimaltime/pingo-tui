@@ -120,6 +120,9 @@ type Model struct {
 	LastTimestamp          time.Time
 	SubscribedSurvey       string
 	Width                  int
+	Height                 int
+	OriginY                int
+	MaxViewHeight          int
 	Store                  history.Store
 	SessionHistory         []history.Session
 	HistoryCursor          int
@@ -293,12 +296,12 @@ func LoadAnswersCmd(store history.Store) tea.Cmd {
 
 func (m Model) Init() tea.Cmd {
 	if m.State == StateConfigMenu {
-		return m.ConfigForm.Init()
+		return tea.Batch(m.ConfigForm.Init(), tea.RequestCursorPosition)
 	}
 	if m.State == StateLoading {
-		return tea.Batch(m.Spinner.Tick, fetchActivePoll(m.SessionCode), startFaye(m.SessionCode), tick(), LoadHistoryCmd(m.Store))
+		return tea.Batch(m.Spinner.Tick, fetchActivePoll(m.SessionCode), startFaye(m.SessionCode), tick(), LoadHistoryCmd(m.Store), tea.RequestCursorPosition)
 	}
-	return tea.Batch(m.Spinner.Tick, textinput.Blink, tick(), LoadHistoryCmd(m.Store))
+	return tea.Batch(m.Spinner.Tick, textinput.Blink, tick(), LoadHistoryCmd(m.Store), tea.RequestCursorPosition)
 }
 
 func tick() tea.Cmd {
@@ -349,6 +352,24 @@ func submitAndSave(m Model, answers []string) tea.Cmd {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	nextModel, cmd := m.update(msg)
+	if nm, ok := nextModel.(Model); ok {
+		nm.syncOriginY()
+		return nm, cmd
+	}
+	return nextModel, cmd
+}
+
+func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.CursorPositionMsg:
+		m.OriginY = msg.Y
+		return m, nil
+	case tea.WindowSizeMsg:
+		m.Width = msg.Width
+		m.Height = msg.Height
+	}
+
 	if m.State == StateConfigMenu {
 		form, cmd := m.ConfigForm.Update(msg)
 		if f, ok := form.(*huh.Form); ok {
@@ -443,6 +464,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
+		m.Height = msg.Height
 		barWidth := msg.Width - 25
 		if barWidth < 20 {
 			barWidth = 20
@@ -462,6 +484,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ansCols[1].Width = qWidth
 			m.HistoryAnswersTable.SetColumns(ansCols)
 		}
+		m.syncOriginY()
 		return m, nil
 
 	case pollFoundMsg:
@@ -598,21 +621,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "esc":
-			switch m.State {
-			case StateRenameSession:
-				m.State = StateSessionInput
-				return m, nil
-			case StateHistoryEdit:
-				m.State = StateHistoryView
-				m.EditInput.Blur()
-				return m, nil
-			case StateHistoryView:
-				m.State = StateHistorySessionSelect
-				m.HistorySessionTable.Focus()
-				return m, nil
-			}
-			if m.IsPromptingCorrect {
-				return m, tea.Quit
+			if next, cmd := navigateBack(m); next != nil {
+				return next, cmd
 			}
 		}
 
@@ -620,26 +630,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case StateHistorySessionSelect:
 			switch msg.String() {
 			case "enter":
-				if len(m.SessionHistory) > 0 {
-					m.SelectedHistorySession = m.SessionHistory[m.HistorySessionTable.Cursor()].Code
-					m.State = StateHistoryView
-
-					var rows []table.Row
-					for _, a := range m.HistoryAnswers {
-						if a.SessionCode == m.SelectedHistorySession {
-							timeStr := a.AnsweredAt.Local().Format("02.01. 15:04")
-							correct := a.CorrectAnswer.String
-							if correct == "" {
-								correct = t(msgUnknownCorrectAnswer)
-							}
-							rows = append(rows, table.Row{timeStr, a.QuestionText, a.GivenAnswer, correct})
-						}
-					}
-					m.HistoryAnswersTable.SetRows(rows)
-					m.HistoryAnswersTable.SetCursor(0)
-				}
-				return m, nil
-			case "esc", "q":
+				return openSelectedHistorySession(m)
+			case "q":
 				m.State = StateSessionInput
 				return m, nil
 			default:
@@ -651,44 +643,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case StateHistoryView:
 			switch msg.String() {
 			case "enter":
-				var currentAnswers []history.Answer
-				for _, a := range m.HistoryAnswers {
-					if a.SessionCode == m.SelectedHistorySession {
-						currentAnswers = append(currentAnswers, a)
-					}
-				}
-
-				if len(currentAnswers) > 0 {
-					m.State = StateHistoryEdit
-					a := currentAnswers[m.HistoryAnswersTable.Cursor()]
-					currentAns := a.CorrectAnswer.String
-
-					var opts []string
-					if a.Options != "" {
-						_ = json.Unmarshal([]byte(a.Options), &opts)
-					}
-
-					m.Options = nil
-					for _, opt := range opts {
-						m.Options = append(m.Options, Option{Label: opt, Value: opt})
-					}
-
-					if a.QuestionType == "single_choice" || a.QuestionType == "multi_choice" {
-						m.Cursor = 0
-						if a.QuestionType == "multi_choice" {
-							m.Selected = make(map[int]bool)
-						} else {
-							m.Selected = nil
-						}
-						return m, nil
-					}
-
-					m.EditInput.SetValue(currentAns)
-					m.EditInput.Focus()
-					return m, textinput.Blink
-				}
-				return m, nil
-			case "esc", "q":
+				return openSelectedHistoryAnswer(m)
+			case "q":
 				m.State = StateHistorySessionSelect
 				return m, nil
 			default:
@@ -698,13 +654,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case StateHistoryEdit:
-			var currentAnswers []history.Answer
-			for _, a := range m.HistoryAnswers {
-				if a.SessionCode == m.SelectedHistorySession {
-					currentAnswers = append(currentAnswers, a)
-				}
-			}
-
+			currentAnswers := sessionAnswers(m)
 			if len(currentAnswers) == 0 {
 				return m, nil
 			}
@@ -728,27 +678,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.Selected[m.Cursor] = !m.Selected[m.Cursor]
 					}
 				case "enter":
-					id := currentAnswerRecord.ID
-					var selectedLabels []string
-
-					if currentAnswerRecord.QuestionType == "single_choice" {
-						if len(m.Options) > 0 {
-							selectedLabels = append(selectedLabels, m.Options[m.Cursor].Label)
-						}
-					} else {
-						for idx, opt := range m.Options {
-							if m.Selected[idx] {
-								selectedLabels = append(selectedLabels, opt.Label)
-							}
-						}
-					}
-
-					newAns := strings.Join(selectedLabels, ", ")
-					_ = m.Store.UpdateCorrectAnswerByID(context.Background(), id, newAns)
-
-					m.State = StateHistoryView
-					return m, LoadAnswersCmd(m.Store)
-				case "esc", "q":
+					return submitHistoryEdit(m)
+				case "q":
 					m.State = StateHistoryView
 				}
 				return m, nil
@@ -758,18 +689,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.EditInput, cmd = m.EditInput.Update(msg)
 
 			if msg.String() == "enter" {
-				id := currentAnswerRecord.ID
-				newAns := strings.TrimSpace(m.EditInput.Value())
-				_ = m.Store.UpdateCorrectAnswerByID(context.Background(), id, newAns)
-				m.State = StateHistoryView
-				m.EditInput.Blur()
-				return m, LoadAnswersCmd(m.Store)
-			}
-
-			if msg.String() == "esc" {
-				m.State = StateHistoryView
-				m.EditInput.Blur()
-				return m, nil
+				return submitHistoryEdit(m)
 			}
 			return m, cmd
 
@@ -791,28 +711,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "up", "k":
-				if len(m.SessionHistory) > 0 {
-					if m.HistoryCursor > 0 {
-						m.HistoryCursor--
-					} else if m.HistoryCursor == -1 {
-						m.HistoryCursor = len(m.SessionHistory) - 1
-					}
-					if m.HistoryCursor >= 0 && m.HistoryCursor < len(m.SessionHistory) {
-						m.SessionInput.SetValue(m.SessionHistory[m.HistoryCursor].Code)
-						m.SessionInput.SetCursor(len(m.SessionInput.Value()))
-					}
-				}
+				moveSessionHistoryCursor(&m, -1)
 				return m, nil
 			case "down", "j":
-				if len(m.SessionHistory) > 0 {
-					if m.HistoryCursor < len(m.SessionHistory)-1 {
-						m.HistoryCursor++
-					}
-					if m.HistoryCursor >= 0 && m.HistoryCursor < len(m.SessionHistory) {
-						m.SessionInput.SetValue(m.SessionHistory[m.HistoryCursor].Code)
-						m.SessionInput.SetCursor(len(m.SessionInput.Value()))
-					}
-				}
+				moveSessionHistoryCursor(&m, 1)
 				return m, nil
 			}
 
@@ -829,16 +731,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.SessionInput.Focus()
 			m.SessionInput, cmd = m.SessionInput.Update(msg)
 			if msg.String() == "enter" {
-				code := strings.TrimSpace(m.SessionInput.Value())
-				if code != "" {
-					if !sessionCodePattern.MatchString(code) {
-						m.ErrMsg = t(msgSessionCodeInvalid)
-						return m, nil
-					}
-					m.SessionCode = code
-					m.State = StateLoading
-					return m, tea.Batch(m.Spinner.Tick, fetchActivePoll(m.SessionCode), startFaye(m.SessionCode))
-				}
+				return submitSessionInput(m)
 			}
 			return m, cmd
 		case StateTextInput:
@@ -846,22 +739,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.AnswerInput.Focus()
 			m.AnswerInput, cmd = m.AnswerInput.Update(msg)
 			if msg.String() == "enter" {
-				value := strings.TrimSpace(m.AnswerInput.Value())
-
-				if m.IsPromptingCorrect {
-					if value != "" {
-						_ = m.Store.UpdateCorrectAnswer(context.Background(), m.SessionCode, value)
-					}
-					return m, tea.Quit
-				}
-
-				if m.Data.IsNumberInput && !numberPattern.MatchString(value) {
-					m.ErrMsg = t(msgNumberRequired)
-					return m, nil
-				}
-				m.ErrMsg = ""
-				m.State = StateSubmitting
-				return m, submitAndSave(m, []string{value})
+				return submitTextInput(m)
 			}
 			return m, cmd
 		case StateMultiTextInput:
@@ -869,19 +747,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.AnswerInput.Focus()
 			m.AnswerInput, cmd = m.AnswerInput.Update(msg)
 			if msg.String() == "enter" {
-				value := strings.TrimSpace(m.AnswerInput.Value())
-				if value == "" {
-					if m.IsPromptingCorrect {
-						if len(m.Answers) > 0 {
-							_ = m.Store.UpdateCorrectAnswer(context.Background(), m.SessionCode, strings.Join(m.Answers, ", "))
-						}
-						return m, tea.Quit
-					}
-					m.State = StateSubmitting
-					return m, submitAndSave(m, m.Answers)
-				}
-				m.Answers = append(m.Answers, value)
-				m.AnswerInput.SetValue("")
+				return submitMultiTextInput(m)
 			}
 			return m, cmd
 		case StateSingleChoice:
@@ -893,16 +759,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.RenameInput.Focus()
 			m.RenameInput, cmd = m.RenameInput.Update(msg)
 			if msg.String() == "enter" {
-				newName := strings.TrimSpace(m.RenameInput.Value())
-				if m.HistoryCursor >= 0 && m.HistoryCursor < len(m.SessionHistory) {
-					code := m.SessionHistory[m.HistoryCursor].Code
-					_ = m.Store.UpdateSessionName(context.Background(), code, newName)
-				}
-				m.State = StateSessionInput
-				return m, LoadHistoryCmd(m.Store)
+				return submitRenameSession(m)
 			}
 			return m, cmd
 		}
+	case tea.MouseMsg:
+		return handleMouse(m, msg)
 	case tea.PasteMsg:
 		var cmd tea.Cmd
 		switch m.State {
@@ -933,18 +795,7 @@ func updateSingleChoice(m Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.Cursor++
 		}
 	case tea.KeySpace, tea.KeyEnter:
-		if len(m.Options) == 0 {
-			return m, nil
-		}
-		choice := m.Options[m.Cursor]
-
-		if m.IsPromptingCorrect {
-			_ = m.Store.UpdateCorrectAnswer(context.Background(), m.SessionCode, choice.Label)
-			return m, tea.Quit
-		}
-
-		m.State = StateSubmitting
-		return m, submitAndSave(m, []string{choice.Value})
+		return submitSingleChoice(m)
 	}
 	return m, nil
 }
@@ -966,22 +817,509 @@ func updateMultiChoice(m Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.Selected[m.Cursor] = !m.Selected[m.Cursor]
 	case tea.KeyEnter:
-		var values []string
-		var labels []string
-		for idx, opt := range m.Options {
-			if m.Selected[idx] {
-				values = append(values, opt.Value)
-				labels = append(labels, opt.Label)
-			}
+		return submitMultiChoice(m)
+	}
+	return m, nil
+}
+
+func sessionAnswers(m Model) []history.Answer {
+	var currentAnswers []history.Answer
+	for _, a := range m.HistoryAnswers {
+		if a.SessionCode == m.SelectedHistorySession {
+			currentAnswers = append(currentAnswers, a)
 		}
+	}
+	return currentAnswers
+}
+
+func navigateBack(m Model) (tea.Model, tea.Cmd) {
+	switch m.State {
+	case StateRenameSession:
+		m.State = StateSessionInput
+		m.RenameInput.Blur()
+		m.SessionInput.Focus()
+		return m, textinput.Blink
+	case StateHistoryEdit:
+		m.State = StateHistoryView
+		m.EditInput.Blur()
+		return m, nil
+	case StateHistoryView:
+		m.State = StateHistorySessionSelect
+		m.HistorySessionTable.Focus()
+		return m, nil
+	case StateHistorySessionSelect:
+		m.State = StateSessionInput
+		m.SessionInput.Focus()
+		return m, textinput.Blink
+	}
+	if m.IsPromptingCorrect {
+		return m, tea.Quit
+	}
+	return nil, nil
+}
+
+func moveSessionHistoryCursor(m *Model, delta int) {
+	if len(m.SessionHistory) == 0 {
+		return
+	}
+	if delta < 0 {
+		if m.HistoryCursor > 0 {
+			m.HistoryCursor--
+		} else if m.HistoryCursor == -1 {
+			m.HistoryCursor = len(m.SessionHistory) - 1
+		}
+	} else if delta > 0 {
+		if m.HistoryCursor < len(m.SessionHistory)-1 {
+			m.HistoryCursor++
+		}
+	}
+	if m.HistoryCursor >= 0 && m.HistoryCursor < len(m.SessionHistory) {
+		m.SessionInput.SetValue(m.SessionHistory[m.HistoryCursor].Code)
+		m.SessionInput.SetCursor(len(m.SessionInput.Value()))
+	}
+}
+
+func submitSessionInput(m Model) (tea.Model, tea.Cmd) {
+	code := strings.TrimSpace(m.SessionInput.Value())
+	if code != "" {
+		if !sessionCodePattern.MatchString(code) {
+			m.ErrMsg = t(msgSessionCodeInvalid)
+			return m, nil
+		}
+		m.SessionCode = code
+		m.State = StateLoading
+		return m, tea.Batch(m.Spinner.Tick, fetchActivePoll(m.SessionCode), startFaye(m.SessionCode))
+	}
+	return m, nil
+}
+
+func submitTextInput(m Model) (tea.Model, tea.Cmd) {
+	value := strings.TrimSpace(m.AnswerInput.Value())
+
+	if m.IsPromptingCorrect {
+		if value != "" {
+			_ = m.Store.UpdateCorrectAnswer(context.Background(), m.SessionCode, value)
+		}
+		return m, tea.Quit
+	}
+
+	if m.Data.IsNumberInput && !numberPattern.MatchString(value) {
+		m.ErrMsg = t(msgNumberRequired)
+		return m, nil
+	}
+	m.ErrMsg = ""
+	m.State = StateSubmitting
+	return m, submitAndSave(m, []string{value})
+}
+
+func submitMultiTextInput(m Model) (tea.Model, tea.Cmd) {
+	value := strings.TrimSpace(m.AnswerInput.Value())
+	if value == "" {
 		if m.IsPromptingCorrect {
-			if len(labels) > 0 {
-				_ = m.Store.UpdateCorrectAnswer(context.Background(), m.SessionCode, strings.Join(labels, ", "))
+			if len(m.Answers) > 0 {
+				_ = m.Store.UpdateCorrectAnswer(context.Background(), m.SessionCode, strings.Join(m.Answers, ", "))
 			}
 			return m, tea.Quit
 		}
 		m.State = StateSubmitting
-		return m, submitAndSave(m, values)
+		return m, submitAndSave(m, m.Answers)
+	}
+	m.Answers = append(m.Answers, value)
+	m.AnswerInput.SetValue("")
+	return m, nil
+}
+
+func submitSingleChoice(m Model) (tea.Model, tea.Cmd) {
+	if len(m.Options) == 0 || m.Cursor < 0 || m.Cursor >= len(m.Options) {
+		return m, nil
+	}
+	choice := m.Options[m.Cursor]
+
+	if m.IsPromptingCorrect {
+		_ = m.Store.UpdateCorrectAnswer(context.Background(), m.SessionCode, choice.Label)
+		return m, tea.Quit
+	}
+
+	m.State = StateSubmitting
+	return m, submitAndSave(m, []string{choice.Value})
+}
+
+func submitMultiChoice(m Model) (tea.Model, tea.Cmd) {
+	var values []string
+	var labels []string
+	for idx, opt := range m.Options {
+		if m.Selected[idx] {
+			values = append(values, opt.Value)
+			labels = append(labels, opt.Label)
+		}
+	}
+	if m.IsPromptingCorrect {
+		if len(labels) > 0 {
+			_ = m.Store.UpdateCorrectAnswer(context.Background(), m.SessionCode, strings.Join(labels, ", "))
+		}
+		return m, tea.Quit
+	}
+	m.State = StateSubmitting
+	return m, submitAndSave(m, values)
+}
+
+func submitRenameSession(m Model) (tea.Model, tea.Cmd) {
+	newName := strings.TrimSpace(m.RenameInput.Value())
+	if m.HistoryCursor >= 0 && m.HistoryCursor < len(m.SessionHistory) {
+		code := m.SessionHistory[m.HistoryCursor].Code
+		_ = m.Store.UpdateSessionName(context.Background(), code, newName)
+	}
+	m.State = StateSessionInput
+	m.RenameInput.Blur()
+	m.SessionInput.Focus()
+	return m, tea.Batch(LoadHistoryCmd(m.Store), textinput.Blink)
+}
+
+func openSelectedHistorySession(m Model) (tea.Model, tea.Cmd) {
+	cursor := m.HistorySessionTable.Cursor()
+	if len(m.SessionHistory) > 0 && cursor >= 0 && cursor < len(m.SessionHistory) {
+		m.SelectedHistorySession = m.SessionHistory[cursor].Code
+		m.State = StateHistoryView
+
+		var rows []table.Row
+		for _, a := range m.HistoryAnswers {
+			if a.SessionCode == m.SelectedHistorySession {
+				timeStr := a.AnsweredAt.Local().Format("02.01. 15:04")
+				correct := a.CorrectAnswer.String
+				if correct == "" {
+					correct = t(msgUnknownCorrectAnswer)
+				}
+				rows = append(rows, table.Row{timeStr, a.QuestionText, a.GivenAnswer, correct})
+			}
+		}
+		m.HistoryAnswersTable.SetRows(rows)
+		m.HistoryAnswersTable.SetCursor(0)
+	}
+	return m, nil
+}
+
+func openSelectedHistoryAnswer(m Model) (tea.Model, tea.Cmd) {
+	currentAnswers := sessionAnswers(m)
+	cursor := m.HistoryAnswersTable.Cursor()
+	if len(currentAnswers) > 0 && cursor >= 0 && cursor < len(currentAnswers) {
+		m.State = StateHistoryEdit
+		a := currentAnswers[cursor]
+		currentAns := a.CorrectAnswer.String
+
+		var opts []string
+		if a.Options != "" {
+			_ = json.Unmarshal([]byte(a.Options), &opts)
+		}
+
+		m.Options = nil
+		for _, opt := range opts {
+			m.Options = append(m.Options, Option{Label: opt, Value: opt})
+		}
+
+		if a.QuestionType == "single_choice" || a.QuestionType == "multi_choice" {
+			m.Cursor = 0
+			if a.QuestionType == "multi_choice" {
+				m.Selected = make(map[int]bool)
+			} else {
+				m.Selected = nil
+			}
+			return m, nil
+		}
+
+		m.EditInput.SetValue(currentAns)
+		m.EditInput.Focus()
+		return m, textinput.Blink
+	}
+	return m, nil
+}
+
+func submitHistoryEdit(m Model) (tea.Model, tea.Cmd) {
+	currentAnswers := sessionAnswers(m)
+	cursor := m.HistoryAnswersTable.Cursor()
+	if len(currentAnswers) == 0 || cursor < 0 || cursor >= len(currentAnswers) {
+		return m, nil
+	}
+	currentAnswerRecord := currentAnswers[cursor]
+	id := currentAnswerRecord.ID
+
+	if currentAnswerRecord.QuestionType == "single_choice" || currentAnswerRecord.QuestionType == "multi_choice" {
+		var selectedLabels []string
+		if currentAnswerRecord.QuestionType == "single_choice" {
+			if len(m.Options) > 0 && m.Cursor >= 0 && m.Cursor < len(m.Options) {
+				selectedLabels = append(selectedLabels, m.Options[m.Cursor].Label)
+			}
+		} else {
+			for idx, opt := range m.Options {
+				if m.Selected[idx] {
+					selectedLabels = append(selectedLabels, opt.Label)
+				}
+			}
+		}
+		newAns := strings.Join(selectedLabels, ", ")
+		_ = m.Store.UpdateCorrectAnswerByID(context.Background(), id, newAns)
+		m.State = StateHistoryView
+		return m, LoadAnswersCmd(m.Store)
+	}
+
+	newAns := strings.TrimSpace(m.EditInput.Value())
+	_ = m.Store.UpdateCorrectAnswerByID(context.Background(), id, newAns)
+	m.State = StateHistoryView
+	m.EditInput.Blur()
+	return m, LoadAnswersCmd(m.Store)
+}
+
+func handleMouse(m Model, msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.Plugins != nil {
+		if handled, cmd := m.Plugins.HandleMouse(&m, msg); handled {
+			return m, cmd
+		}
+	}
+
+	switch msg := msg.(type) {
+	case tea.MouseWheelMsg:
+		switch m.State {
+		case StateSessionInput:
+			switch msg.Button {
+			case tea.MouseWheelUp:
+				moveSessionHistoryCursor(&m, -1)
+			case tea.MouseWheelDown:
+				moveSessionHistoryCursor(&m, 1)
+			}
+			return m, nil
+		case StateSingleChoice, StateMultiChoice:
+			switch msg.Button {
+			case tea.MouseWheelUp:
+				if m.Cursor > 0 {
+					m.Cursor--
+				}
+			case tea.MouseWheelDown:
+				if m.Cursor < len(m.Options)-1 {
+					m.Cursor++
+				}
+			}
+			return m, nil
+		case StateHistorySessionSelect:
+			var cmd tea.Cmd
+			m.HistorySessionTable, cmd = m.HistorySessionTable.Update(msg)
+			return m, cmd
+		case StateHistoryView:
+			var cmd tea.Cmd
+			m.HistoryAnswersTable, cmd = m.HistoryAnswersTable.Update(msg)
+			return m, cmd
+		case StateHistoryEdit:
+			currentAnswers := sessionAnswers(m)
+			cursor := m.HistoryAnswersTable.Cursor()
+			if len(currentAnswers) > 0 && cursor >= 0 && cursor < len(currentAnswers) {
+				a := currentAnswers[cursor]
+				if a.QuestionType == "single_choice" || a.QuestionType == "multi_choice" {
+					switch msg.Button {
+					case tea.MouseWheelUp:
+						if m.Cursor > 0 {
+							m.Cursor--
+						}
+					case tea.MouseWheelDown:
+						if m.Cursor < len(m.Options)-1 {
+							m.Cursor++
+						}
+					}
+				}
+			}
+			return m, nil
+		}
+		return m, nil
+
+	case tea.MouseClickMsg:
+		m.syncOriginY()
+		relY := msg.Y - m.OriginY
+		switch msg.Button {
+		case tea.MouseRight, tea.MouseBackward:
+			if next, cmd := navigateBack(m); next != nil {
+				return next, cmd
+			}
+			return m, nil
+		case tea.MouseLeft:
+			if fy := footerY(m); fy >= 0 && relY == fy {
+				if action := footerActionAtX(m, msg.X); action != "" {
+					return handleFooterAction(m, action)
+				}
+				return m, nil
+			}
+			return handleLeftClick(m, msg.X, relY)
+		}
+	}
+
+	return m, nil
+}
+
+func handleFooterAction(m Model, action string) (tea.Model, tea.Cmd) {
+	switch action {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		if next, cmd := navigateBack(m); next != nil {
+			return next, cmd
+		}
+		return m, nil
+	case "v":
+		if m.State == StateSessionInput {
+			m.State = StateHistorySessionSelect
+			m.HistorySessionTable.SetCursor(0)
+			return m, LoadAnswersCmd(m.Store)
+		}
+	case "space":
+		switch m.State {
+		case StateMultiChoice:
+			if len(m.Options) > 0 && m.Cursor >= 0 && m.Cursor < len(m.Options) {
+				if m.Selected == nil {
+					m.Selected = make(map[int]bool)
+				}
+				m.Selected[m.Cursor] = !m.Selected[m.Cursor]
+			}
+		case StateHistoryEdit:
+			currentAnswers := sessionAnswers(m)
+			cursor := m.HistoryAnswersTable.Cursor()
+			if len(currentAnswers) > 0 && cursor >= 0 && cursor < len(currentAnswers) && currentAnswers[cursor].QuestionType == "multi_choice" {
+				if len(m.Options) > 0 && m.Cursor >= 0 && m.Cursor < len(m.Options) {
+					if m.Selected == nil {
+						m.Selected = make(map[int]bool)
+					}
+					m.Selected[m.Cursor] = !m.Selected[m.Cursor]
+				}
+			}
+		}
+	case "enter":
+		switch m.State {
+		case StateSessionInput:
+			return submitSessionInput(m)
+		case StateTextInput:
+			return submitTextInput(m)
+		case StateMultiTextInput:
+			return submitMultiTextInput(m)
+		case StateSingleChoice:
+			return submitSingleChoice(m)
+		case StateMultiChoice:
+			return submitMultiChoice(m)
+		case StateRenameSession:
+			return submitRenameSession(m)
+		case StateHistorySessionSelect:
+			return openSelectedHistorySession(m)
+		case StateHistoryView:
+			return openSelectedHistoryAnswer(m)
+		case StateHistoryEdit:
+			return submitHistoryEdit(m)
+		}
+	}
+	return m, nil
+}
+
+func handleLeftClick(m Model, _, y int) (tea.Model, tea.Cmd) {
+	switch m.State {
+	case StateSessionInput:
+		if y == 2 {
+			m.SessionInput.Focus()
+			return m, textinput.Blink
+		}
+		if len(m.SessionHistory) > 0 {
+			idx := y - 5
+			if idx >= 0 && idx < len(m.SessionHistory) {
+				if m.HistoryCursor == idx {
+					m.SessionInput.SetValue(m.SessionHistory[idx].Code)
+					m.SessionInput.SetCursor(len(m.SessionInput.Value()))
+					return submitSessionInput(m)
+				}
+				m.HistoryCursor = idx
+				m.SessionInput.SetValue(m.SessionHistory[idx].Code)
+				m.SessionInput.SetCursor(len(m.SessionInput.Value()))
+			}
+		}
+		return m, nil
+
+	case StateSingleChoice:
+		optStartY := choiceOptionsStartY(m)
+		if idx := y - optStartY; idx >= 0 && idx < len(m.Options) {
+			m.Cursor = idx
+			return submitSingleChoice(m)
+		}
+		return m, nil
+
+	case StateMultiChoice:
+		optStartY := choiceOptionsStartY(m)
+		if idx := y - optStartY; idx >= 0 && idx < len(m.Options) {
+			m.Cursor = idx
+			if m.Selected == nil {
+				m.Selected = make(map[int]bool)
+			}
+			m.Selected[idx] = !m.Selected[idx]
+			return m, nil
+		}
+		if y == optStartY+len(m.Options) {
+			return submitMultiChoice(m)
+		}
+		return m, nil
+
+	case StateTextInput:
+		m.AnswerInput.Focus()
+		return m, textinput.Blink
+
+	case StateMultiTextInput:
+		if y == multiTextSubmitHintY(m) {
+			return submitMultiTextInput(m)
+		}
+		m.AnswerInput.Focus()
+		return m, textinput.Blink
+
+	case StateRenameSession:
+		m.RenameInput.Focus()
+		return m, textinput.Blink
+
+	case StateHistorySessionSelect:
+		if len(m.SessionHistory) > 0 {
+			rowIdx := m.HistorySessionTable.RowAtY(y - 2)
+			if rowIdx >= 0 && rowIdx < len(m.SessionHistory) {
+				m.HistorySessionTable.SetCursor(rowIdx)
+				return openSelectedHistorySession(m)
+			}
+		}
+		return m, nil
+
+	case StateHistoryView:
+		rowIdx := m.HistoryAnswersTable.RowAtY(y - 2)
+		if rowIdx >= 0 {
+			if rowIdx != m.HistoryAnswersTable.Cursor() {
+				m.HistoryAnswersTable.SetCursor(rowIdx)
+				return m, nil
+			}
+			return openSelectedHistoryAnswer(m)
+		}
+		return m, nil
+
+	case StateHistoryEdit:
+		currentAnswers := sessionAnswers(m)
+		cursor := m.HistoryAnswersTable.Cursor()
+		if len(currentAnswers) == 0 || cursor < 0 || cursor >= len(currentAnswers) {
+			return m, nil
+		}
+		a := currentAnswers[cursor]
+		if a.QuestionType == "single_choice" || a.QuestionType == "multi_choice" {
+			optStartY := historyEditOptionsStartY(m, a)
+			if idx := y - optStartY; idx >= 0 && idx < len(m.Options) {
+				m.Cursor = idx
+				if a.QuestionType == "single_choice" {
+					return submitHistoryEdit(m)
+				}
+				if m.Selected == nil {
+					m.Selected = make(map[int]bool)
+				}
+				m.Selected[idx] = !m.Selected[idx]
+				return m, nil
+			}
+			if a.QuestionType == "multi_choice" && y == optStartY+len(m.Options)+1 {
+				return submitHistoryEdit(m)
+			}
+			return m, nil
+		}
+		m.EditInput.Focus()
+		return m, textinput.Blink
 	}
 	return m, nil
 }
@@ -1113,17 +1451,112 @@ func correctPromptLine(m Model) string {
 	return ""
 }
 
+func newInteractiveView(content string) tea.View {
+	v := tea.NewView(content)
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
+}
+
+func viewLineCount(m Model) int {
+	content := strings.TrimRight(m.View().Content, "\n")
+	if content == "" {
+		return 0
+	}
+	return strings.Count(content, "\n") + 1
+}
+
+func (m *Model) syncOriginY() {
+	h := viewLineCount(*m)
+	if h > m.MaxViewHeight {
+		m.MaxViewHeight = h
+	}
+	if m.Height > 0 && m.MaxViewHeight > 0 && m.OriginY+m.MaxViewHeight > m.Height {
+		m.OriginY = max(0, m.Height-m.MaxViewHeight)
+	}
+}
+
+func blockStartY(targetIdx int, lines ...string) int {
+	start := 0
+	for start < targetIdx && strings.TrimSpace(lines[start]) == "" {
+		start++
+	}
+	if targetIdx <= start {
+		return 0
+	}
+	return strings.Count(strings.Join(lines[start:targetIdx], "\n"), "\n") + 1
+}
+
+func choiceOptionsStartY(m Model) int {
+	q := questionLine(m.Question)
+	lines := []string{timeLeftLine(m)}
+	if p := correctPromptLine(m); p != "" {
+		lines = append(lines, p)
+	}
+	if q != "" {
+		lines = append(lines, q)
+	}
+	lines = append(lines, "")
+	targetIdx := len(lines)
+	lines = append(lines, choiceListView(m.Options, m.Cursor, nil))
+	return blockStartY(targetIdx, lines...)
+}
+
+func historyEditOptionsStartY(m Model, a history.Answer) int {
+	inputView := choiceListView(m.Options, m.Cursor, m.Selected)
+	return blockStartY(
+		5,
+		titleStyle.Render(t(msgEditCorrectAnswerTitle)),
+		"",
+		hintStyle.Render(tData(msgQuestionLabel, map[string]any{"Question": a.QuestionText})),
+		hintStyle.Render(tData(msgYourAnswerLabel, map[string]any{"Answer": a.GivenAnswer})),
+		"",
+		inputView,
+	)
+}
+
+func multiTextSubmitHintY(m Model) int {
+	answers := strings.Join(m.Answers, ", ")
+	q := questionLine(m.Question)
+	lines := []string{timeLeftLine(m)}
+	if p := correctPromptLine(m); p != "" {
+		lines = append(lines, p)
+	}
+	if q != "" {
+		lines = append(lines, q)
+	}
+	lines = append(lines,
+		"",
+		hintStyle.Render(tData(msgAnswersSoFar, map[string]any{"Answers": answers})),
+		m.AnswerInput.View(),
+		errLine(m.ErrMsg),
+	)
+	targetIdx := len(lines)
+	lines = append(lines, hintStyle.Render(t(msgEnterToAdd)))
+	return blockStartY(targetIdx, lines...)
+}
+
+func footerY(m Model) int {
+	if m.State == StateDone || m.State == StateError || m.State == StateConfigMenu {
+		return -1
+	}
+	content := strings.TrimRight(m.View().Content, "\n")
+	if content == "" {
+		return -1
+	}
+	return strings.Count(content, "\n")
+}
+
 func (m Model) View() tea.View {
 	switch m.State {
 	case StatePluginView:
 		// Hook: Render custom plugin views
-		return tea.NewView(joinLines(
+		return newInteractiveView(joinLines(
 			titleStyle.Render("PLUGIN VIEW"),
 			m.Plugins.RenderView(&m),
 			footerLine(m),
 		))
 	case StateConfigMenu:
-		return tea.NewView(joinLines(
+		return newInteractiveView(joinLines(
 			titleStyle.Render("PINGO CONFIGURATION"),
 			"",
 			m.ConfigForm.View(),
@@ -1151,7 +1584,7 @@ func (m Model) View() tea.View {
 			historyView = "\n" + strings.TrimRight(b.String(), "\n")
 		}
 
-		return tea.NewView(joinLines(
+		return newInteractiveView(joinLines(
 			titleStyle.Render("PINGO"),
 			"",
 			m.SessionInput.View(),
@@ -1162,7 +1595,7 @@ func (m Model) View() tea.View {
 		))
 
 	case StateRenameSession:
-		return tea.NewView(joinLines(
+		return newInteractiveView(joinLines(
 			titleStyle.Render(t(msgRenameSessionTitle)),
 			"",
 			hintStyle.Render(tData(msgNewNameForSession, map[string]any{"Code": m.SessionHistory[m.HistoryCursor].Code})),
@@ -1172,7 +1605,7 @@ func (m Model) View() tea.View {
 		))
 
 	case StateLoading:
-		return tea.NewView(joinLines(
+		return newInteractiveView(joinLines(
 			logStyle.Render(t(msgConnecting)),
 			logStyle.Render(fmt.Sprintf("%s %s", m.Spinner.View(), t(msgWaitingActive))),
 			"",
@@ -1189,7 +1622,7 @@ func (m Model) View() tea.View {
 			lines = append(lines, q)
 		}
 		lines = append(lines, "", m.AnswerInput.View(), errLine(m.ErrMsg), "", footerLine(m))
-		return tea.NewView(joinLines(lines...))
+		return newInteractiveView(joinLines(lines...))
 
 	case StateMultiTextInput:
 		answers := strings.Join(m.Answers, ", ")
@@ -1210,7 +1643,7 @@ func (m Model) View() tea.View {
 			"",
 			footerLine(m),
 		)
-		return tea.NewView(joinLines(lines...))
+		return newInteractiveView(joinLines(lines...))
 
 	case StateSingleChoice:
 		q := questionLine(m.Question)
@@ -1222,7 +1655,7 @@ func (m Model) View() tea.View {
 			lines = append(lines, q)
 		}
 		lines = append(lines, "", choiceListView(m.Options, m.Cursor, nil), "", footerLine(m))
-		return tea.NewView(joinLines(lines...))
+		return newInteractiveView(joinLines(lines...))
 
 	case StateMultiChoice:
 		q := questionLine(m.Question)
@@ -1240,7 +1673,7 @@ func (m Model) View() tea.View {
 			"",
 			footerLine(m),
 		)
-		return tea.NewView(joinLines(lines...))
+		return newInteractiveView(joinLines(lines...))
 
 	case StateSubmitting:
 		q := questionLine(m.Question)
@@ -1254,7 +1687,7 @@ func (m Model) View() tea.View {
 			"",
 			footerLine(m),
 		)
-		return tea.NewView(joinLines(lines...))
+		return newInteractiveView(joinLines(lines...))
 
 	case StateHistorySessionSelect:
 		var b strings.Builder
@@ -1271,15 +1704,10 @@ func (m Model) View() tea.View {
 
 		b.WriteString("\n")
 		b.WriteString(footerLine(m))
-		return tea.NewView(b.String())
+		return newInteractiveView(b.String())
 
 	case StateHistoryView:
-		var currentAnswers []history.Answer
-		for _, a := range m.HistoryAnswers {
-			if a.SessionCode == m.SelectedHistorySession {
-				currentAnswers = append(currentAnswers, a)
-			}
-		}
+		currentAnswers := sessionAnswers(m)
 
 		var b strings.Builder
 		b.WriteString(titleStyle.Render(fmt.Sprintf("%s [%s]", t(msgHistoryViewTitle), m.SelectedHistorySession)))
@@ -1295,15 +1723,10 @@ func (m Model) View() tea.View {
 
 		b.WriteString("\n")
 		b.WriteString(footerLine(m))
-		return tea.NewView(b.String())
+		return newInteractiveView(b.String())
 
 	case StateHistoryEdit:
-		var currentAnswers []history.Answer
-		for _, a := range m.HistoryAnswers {
-			if a.SessionCode == m.SelectedHistorySession {
-				currentAnswers = append(currentAnswers, a)
-			}
-		}
+		currentAnswers := sessionAnswers(m)
 
 		var a history.Answer
 		if len(currentAnswers) > 0 {
@@ -1320,7 +1743,7 @@ func (m Model) View() tea.View {
 			inputView = m.EditInput.View()
 		}
 
-		return tea.NewView(joinLines(
+		return newInteractiveView(joinLines(
 			titleStyle.Render(t(msgEditCorrectAnswerTitle)),
 			"",
 			hintStyle.Render(tData(msgQuestionLabel, map[string]any{"Question": a.QuestionText})),
@@ -1439,66 +1862,99 @@ func footerLine(m Model) string {
 	return footerStyle.Width(width).Padding(0, 1).Render(content)
 }
 
-func footerHotkeys(m Model) string {
-	parts := []string{}
+type footerItem struct {
+	rendered string
+	action   string
+}
+
+func footerHotkeyItems(m Model) []footerItem {
+	var items []footerItem
 
 	if m.IsPromptingCorrect {
-		parts = []string{
-			keyStyle.Render("Enter") + barDimStyle.Render(" "+t(msgSubmit)),
-			keyStyle.Render("Esc") + barDimStyle.Render(" "+t(msgBack)),
+		items = []footerItem{
+			{rendered: keyStyle.Render("Enter") + barDimStyle.Render(" "+t(msgSubmit)), action: "enter"},
+			{rendered: keyStyle.Render("Esc") + barDimStyle.Render(" "+t(msgBack)), action: "esc"},
 		}
 	} else if m.State == StateHistoryView || m.State == StateHistorySessionSelect {
-		parts = []string{
-			keyStyle.Render("Up/Down") + barDimStyle.Render(" "+t(msgMove)),
-			keyStyle.Render("Enter") + barDimStyle.Render(" "+t(msgEdit)),
-			keyStyle.Render("Esc") + barDimStyle.Render(" "+t(msgBack)),
+		items = []footerItem{
+			{rendered: keyStyle.Render("Up/Down") + barDimStyle.Render(" "+t(msgMove)), action: ""},
+			{rendered: keyStyle.Render("Enter") + barDimStyle.Render(" "+t(msgEdit)), action: "enter"},
+			{rendered: keyStyle.Render("Esc") + barDimStyle.Render(" "+t(msgBack)), action: "esc"},
 		}
 	} else if m.State == StateHistoryEdit {
-		var currentAnswers []history.Answer
-		for _, a := range m.HistoryAnswers {
-			if a.SessionCode == m.SelectedHistorySession {
-				currentAnswers = append(currentAnswers, a)
-			}
-		}
-		if len(currentAnswers) > 0 {
-			a := currentAnswers[m.HistoryAnswersTable.Cursor()]
+		currentAnswers := sessionAnswers(m)
+		cursor := m.HistoryAnswersTable.Cursor()
+		if len(currentAnswers) > 0 && cursor >= 0 && cursor < len(currentAnswers) {
+			a := currentAnswers[cursor]
 			switch a.QuestionType {
 			case "multi_choice":
-				parts = []string{
-					keyStyle.Render("Up/Down") + barDimStyle.Render(" "+t(msgMove)),
-					keyStyle.Render("Space") + barDimStyle.Render(" "+t(msgToggle)),
-					keyStyle.Render("Enter") + barDimStyle.Render(" "+t(msgSubmit)),
-					keyStyle.Render("Esc") + barDimStyle.Render(" "+t(msgBack)),
+				items = []footerItem{
+					{rendered: keyStyle.Render("Up/Down") + barDimStyle.Render(" "+t(msgMove)), action: ""},
+					{rendered: keyStyle.Render("Space") + barDimStyle.Render(" "+t(msgToggle)), action: "space"},
+					{rendered: keyStyle.Render("Enter") + barDimStyle.Render(" "+t(msgSubmit)), action: "enter"},
+					{rendered: keyStyle.Render("Esc") + barDimStyle.Render(" "+t(msgBack)), action: "esc"},
 				}
 			case "single_choice":
-				parts = []string{
-					keyStyle.Render("Up/Down") + barDimStyle.Render(" "+t(msgMove)),
-					keyStyle.Render("Enter") + barDimStyle.Render(" "+t(msgSubmit)),
-					keyStyle.Render("Esc") + barDimStyle.Render(" "+t(msgBack)),
+				items = []footerItem{
+					{rendered: keyStyle.Render("Up/Down") + barDimStyle.Render(" "+t(msgMove)), action: ""},
+					{rendered: keyStyle.Render("Enter") + barDimStyle.Render(" "+t(msgSubmit)), action: "enter"},
+					{rendered: keyStyle.Render("Esc") + barDimStyle.Render(" "+t(msgBack)), action: "esc"},
 				}
 			default:
-				parts = []string{
-					keyStyle.Render("Enter") + barDimStyle.Render(" "+t(msgSubmit)),
-					keyStyle.Render("Esc") + barDimStyle.Render(" "+t(msgBack)),
+				items = []footerItem{
+					{rendered: keyStyle.Render("Enter") + barDimStyle.Render(" "+t(msgSubmit)), action: "enter"},
+					{rendered: keyStyle.Render("Esc") + barDimStyle.Render(" "+t(msgBack)), action: "esc"},
 				}
 			}
 		} else {
-			parts = []string{
-				keyStyle.Render("Enter") + barDimStyle.Render(" "+t(msgSubmit)),
-				keyStyle.Render("Esc") + barDimStyle.Render(" "+t(msgBack)),
+			items = []footerItem{
+				{rendered: keyStyle.Render("Enter") + barDimStyle.Render(" "+t(msgSubmit)), action: "enter"},
+				{rendered: keyStyle.Render("Esc") + barDimStyle.Render(" "+t(msgBack)), action: "esc"},
 			}
 		}
 	} else {
 		if m.State == StateSessionInput {
-			parts = append(parts, keyStyle.Render("v")+barDimStyle.Render(" "+t(msgViewHistory)))
+			items = append(items, footerItem{rendered: keyStyle.Render("v") + barDimStyle.Render(" "+t(msgViewHistory)), action: "v"})
 		}
 		if m.State == StateSingleChoice || m.State == StateMultiChoice {
-			parts = append(parts, keyStyle.Render("Up/Down")+barDimStyle.Render(" "+t(msgMove)))
+			items = append(items, footerItem{rendered: keyStyle.Render("Up/Down") + barDimStyle.Render(" "+t(msgMove)), action: ""})
 		}
 		if m.State == StateMultiChoice {
-			parts = append(parts, keyStyle.Render("Space")+barDimStyle.Render(" "+t(msgToggle)))
+			items = append(items, footerItem{rendered: keyStyle.Render("Space") + barDimStyle.Render(" "+t(msgToggle)), action: "space"})
 		}
-		parts = append(parts, keyStyle.Render("Enter")+barDimStyle.Render(" "+t(msgSubmit)))
+		items = append(items, footerItem{rendered: keyStyle.Render("Enter") + barDimStyle.Render(" "+t(msgSubmit)), action: "enter"})
+	}
+
+	return items
+}
+
+func footerActionAtX(m Model, clickX int) string {
+	if clickX < 1 {
+		return ""
+	}
+	items := footerHotkeyItems(m)
+	right := footerItem{
+		rendered: keyStyle.Render("Ctrl+C") + barDimStyle.Render(" "+t(msgQuit)),
+		action:   "ctrl+c",
+	}
+	allItems := append(items, right)
+
+	x := 1
+	for _, item := range allItems {
+		w := lipgloss.Width(item.rendered)
+		if clickX >= x && clickX < x+w {
+			return item.action
+		}
+		x += w + 5
+	}
+	return ""
+}
+
+func footerHotkeys(m Model) string {
+	items := footerHotkeyItems(m)
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		parts = append(parts, item.rendered)
 	}
 
 	joiner := barDimStyle.Render("  ") + barSepStyle.Render("|") + barDimStyle.Render("  ")
