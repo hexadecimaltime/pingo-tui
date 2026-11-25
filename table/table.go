@@ -231,9 +231,36 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case key.Matches(msg, m.KeyMap.GotoBottom):
 			m.GotoBottom()
 		}
+	case tea.MouseWheelMsg:
+		switch msg.Button {
+		case tea.MouseWheelUp:
+			m.MoveUp(1)
+		case tea.MouseWheelDown:
+			m.MoveDown(1)
+		}
 	}
 
 	return m, nil
+}
+
+// RowAtY returns the row index at the given 0-based Y coordinate relative to
+// the top of the table's View, or -1 if outside data rows.
+func (m *Model) RowAtY(relY int) int {
+	headerHeight := lipgloss.Height(m.headersView())
+	viewportY := relY - headerHeight
+	if len(m.rows) == 0 || viewportY < 0 || viewportY >= m.viewport.Height() {
+		return -1
+	}
+
+	contentLine := m.viewport.YOffset() + viewportY
+	for r := 0; r < len(m.rows); r++ {
+		rowHeight := strings.Count(m.renderRow(r), "\n") + 1
+		if contentLine < rowHeight {
+			return r
+		}
+		contentLine -= rowHeight
+	}
+	return -1
 }
 
 // Focused returns the focus state of the table.
